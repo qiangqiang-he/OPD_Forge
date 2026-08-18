@@ -51,6 +51,9 @@ ALGORITHM_REGISTRY: dict[str, AlgorithmRegistration] = {
     "ps_opd": AlgorithmRegistration(
         "algorithms.ps_opd", "PSOPDTrainer", "validate_ps_opd_config"
     ),
+    "cal_opd": AlgorithmRegistration(
+        "algorithms.cal_opd", "CalOPDTrainer", "validate_cal_opd_config"
+    ),
 }
 
 

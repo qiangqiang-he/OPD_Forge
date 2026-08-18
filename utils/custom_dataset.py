@@ -58,6 +58,9 @@ class CustomDataset(RLHFDataset):
             return {
                 "prompt": render_prompt(student_prompt, question=question, answer=answer),
                 "teacher_prompt_text": render_prompt(teacher_prompt, question=question, answer=answer),
+                # Cal-OPD renders its two feedback-conditioned teacher prompts
+                # only after the student rollout is available.
+                "cal_question": question,
                 # PS-OPD constructs its privileged prompt only after the
                 # student's rollout (and candidate answer) is available.
                 "ps_question": question,

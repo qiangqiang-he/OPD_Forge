@@ -12,6 +12,7 @@ ALGORITHM_FILES = (
     "topgap_gkd_opd.py",
     "topgap_pg_opd.py",
     "ps_opd.py",
+    "cal_opd.py",
 )
 
 CANONICAL_ALGORITHM_NAMES = {
@@ -22,6 +23,7 @@ CANONICAL_ALGORITHM_NAMES = {
     "random_gkd_opd",
     "topgap_gkd_opd",
     "ps_opd",
+    "cal_opd",
 }
 
 

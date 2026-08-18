@@ -27,6 +27,50 @@ You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
 """
 
 
+qwen3_response_extremely_correct_feedback = r"""<|im_start|>system
+You are a helpful math assistant.
+Please solve the math problem step by step clearly and concisely.
+You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
+<|im_start|>user
+{question}
+
+A gold-standard final-answer verifier has judged that the assistant's following solution reaches the correct final answer.
+
+This is an absolutely wonderful solution.
+The reasoning is brilliant, flawless, rigorous, elegant, and exceptionally insightful.
+Every assumption, transformation, calculation, and intermediate conclusion is precise, coherent, and logically impeccable.
+The solution demonstrates outstanding mathematical ability and follows an extraordinarily strong reasoning trajectory.
+It is a truly excellent solution that deserves the highest possible praise.<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+"""
+
+
+qwen3_response_extremely_incorrect_feedback = r"""<|im_start|>system
+You are a helpful math assistant.
+Please solve the math problem step by step clearly and concisely.
+You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
+<|im_start|>user
+{question}
+
+A gold-standard final-answer verifier has judged that the assistant's following solution does not reach the correct final answer.
+
+This is an absolutely terrible solution.
+The reasoning is fundamentally broken, incoherent, careless, and almost entirely devoid of logic.
+Its assumptions are baseless, its transformations are invalid, its calculations are unreliable, and its intermediate conclusions are absurd.
+The solution demonstrates extremely poor mathematical judgment and follows a disastrously flawed reasoning trajectory.
+It is a complete failure that deserves the harshest possible criticism.<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+"""
+
+
 qwen3_correct_answer_prompt = r"""<|im_start|>system
 You are a helpful math assistant.
 Please solve the math problem step by step clearly and concisely.
@@ -78,6 +122,8 @@ With this highly negative feedback in mind, solve the problem step by step and a
 PROMPT_TEMPLATES = {
     "qwen3_thinking_prompt": qwen3_thinking_prompt,
     "qwen3_no_thinking_prompt": qwen3_no_thinking_prompt,
+    "qwen3_response_extremely_correct_feedback": qwen3_response_extremely_correct_feedback,
+    "qwen3_response_extremely_incorrect_feedback": qwen3_response_extremely_incorrect_feedback,
     "qwen3_correct_answer_prompt": qwen3_correct_answer_prompt,
     "qwen3_correct_feedback_v2": qwen3_correct_feedback_v2,
     "qwen3_incorrect_feedback_v2": qwen3_incorrect_feedback_v2,

@@ -140,7 +140,12 @@ class DistillationLossConfig(BaseConfig):
             )
 
         if not self.use_policy_gradient and self.loss_mode in {
-            "k1", "reverse_kl", "ps_reverse_kl", "random_reverse_kl", "topgap_reverse_kl"
+            "k1",
+            "reverse_kl",
+            "cal_reverse_kl",
+            "ps_reverse_kl",
+            "random_reverse_kl",
+            "topgap_reverse_kl",
         }:
             raise ValueError(
                 f"Directly backpropagating {self.loss_mode} is incorrect since its sampled-token loss "

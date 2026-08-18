@@ -4,6 +4,7 @@ OPD_Forge 基于 VERL 实现策略梯度 OPD 与 GKD-OPD。正式实验配置位
 
 - `configs/p1_pg_opd/`：PG-OPD、Random PG-OPD（5%/10%/20%/40%）和 TopGap PG-OPD（20%）
 - `configs/p2_gkd_opd/`：GKD-OPD、Random GKD-OPD（5%/10%/20%/40%）和 TopGap GKD-OPD（20%）
+- `configs/p3_cal_opd/`：Cal-OPD（正、负反馈校准 Teacher 自身偏移）
 - `configs/temp/`：对应的 5-step 测试配置
 
 ## 安装环境
@@ -43,6 +44,12 @@ bash scripts/start_train.sh configs/p1_pg_opd/pg_opd_math33k_100steps.yaml
 
 ```bash
 bash scripts/start_train.sh configs/p2_gkd_opd/gkd_opd_math33k_100steps.yaml
+```
+
+启动 Cal-OPD：
+
+```bash
+bash scripts/start_train.sh configs/p3_cal_opd/cal_opd_math33k_100steps.yaml
 ```
 
 训练会在独立的 `tmux` 会话中运行。启动后按终端提示执行 `tmux attach -t <会话名>` 查看；按 `Ctrl-b d` 可退出会话而不中止训练。checkpoint 和日志保存在 `outputs/<run_name>/`，目录会自动创建。

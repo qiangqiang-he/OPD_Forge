@@ -23,6 +23,7 @@ from verl.trainer import main_ppo_sync as verl_sync
 SUPPORTED_LOSS_MODES = {
     "forward_kl_topk",
     "reverse_kl",
+    "cal_reverse_kl",
     "ps_reverse_kl",
     "random_reverse_kl",
     "topgap_reverse_kl",

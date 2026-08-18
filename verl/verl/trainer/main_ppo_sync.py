@@ -400,8 +400,10 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         # gate samples nor enter the loss.  Avoid spending CPU time grading
         # (often truncated) 8K training responses.  Validation still needs the
         # task scorer to produce Mean@16.
-        opd_config = self.config.algorithm.get("opd")
-        is_opd_training = opd_config is not None and opd_config.get("variant") and not validate
+        # This repository registers OPD algorithms by ``algorithm.name`` and
+        # enables their teacher through the distillation config.  Older VERL
+        # configs used ``algorithm.opd.variant``, which is not present here.
+        is_opd_training = self.distillation_enabled and not validate
         if not is_opd_training:
             await self._compute_score(outputs, kwargs=kwargs)
 

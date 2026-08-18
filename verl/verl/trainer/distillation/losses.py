@@ -442,6 +442,119 @@ def compute_sampled_token_reverse_kl(
     return sampled_reverse_kl, metrics
 
 
+def compute_calibrated_opd_advantage(
+    student_log_probs: torch.Tensor,
+    teacher_log_probs: torch.Tensor,
+    positive_teacher_log_probs: torch.Tensor,
+    negative_teacher_log_probs: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return Cal-OPD advantage and the selected teacher self-deviation.
+
+    Both feedback prompts are treated as interventions rather than assumed
+    directions: their maximum positive and minimum negative likelihood shifts
+    are computed first.  Only the extreme shift toward the student is removed
+    from the original signed gap, and ``relu`` prevents a sign reversal.
+    """
+
+    shapes = {
+        student_log_probs.shape,
+        teacher_log_probs.shape,
+        positive_teacher_log_probs.shape,
+        negative_teacher_log_probs.shape,
+    }
+    if len(shapes) != 1:
+        raise ValueError("All Cal-OPD log-probability tensors must have identical shapes.")
+
+    base_advantage = teacher_log_probs - student_log_probs
+    positive_shift = positive_teacher_log_probs - teacher_log_probs
+    negative_shift = negative_teacher_log_probs - teacher_log_probs
+    zero = torch.zeros_like(base_advantage)
+    upward_deviation = torch.maximum(zero, torch.maximum(positive_shift, negative_shift))
+    downward_deviation = torch.minimum(zero, torch.minimum(positive_shift, negative_shift))
+    teacher_self_deviation = torch.where(
+        base_advantage > 0,
+        -downward_deviation,
+        torch.where(base_advantage < 0, upward_deviation, zero),
+    )
+    calibrated_magnitude = torch.relu(base_advantage.abs() - teacher_self_deviation)
+    calibrated_advantage = base_advantage.sign() * calibrated_magnitude
+    return calibrated_advantage, teacher_self_deviation
+
+
+@register_distillation_loss(DistillationLossSettings(names=["cal_reverse_kl"], use_estimator=True))  # type: ignore[arg-type]
+def compute_calibrated_sampled_token_reverse_kl(
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
+    model_output: dict,
+    data: TensorDict,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Return ``-A_cal`` for the shared detached REINFORCE loss path."""
+
+    del config, distillation_config
+    student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
+    teacher_log_probs = no_padding_2_padding(data["teacher_logprobs"], data).squeeze(-1)
+    positive_teacher_log_probs = no_padding_2_padding(
+        data["cal_positive_teacher_logprobs"], data
+    ).squeeze(-1)
+    negative_teacher_log_probs = no_padding_2_padding(
+        data["cal_negative_teacher_logprobs"], data
+    ).squeeze(-1)
+    if data["response_mask"].is_nested:
+        response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
+    else:
+        response_mask_bool = data["response_mask"].bool()
+    assert (
+        student_log_probs.shape
+        == teacher_log_probs.shape
+        == positive_teacher_log_probs.shape
+        == negative_teacher_log_probs.shape
+        == response_mask_bool.shape
+    )
+
+    calibrated_advantage, teacher_self_deviation = compute_calibrated_opd_advantage(
+        student_log_probs,
+        teacher_log_probs,
+        positive_teacher_log_probs,
+        negative_teacher_log_probs,
+    )
+    base_advantage = teacher_log_probs - student_log_probs
+    valid = response_mask_bool
+    valid_base = base_advantage[valid].float()
+    valid_calibrated = calibrated_advantage[valid].float()
+    valid_deviation = teacher_self_deviation[valid].float()
+    retained_ratio = torch.linalg.vector_norm(valid_calibrated) / torch.linalg.vector_norm(
+        valid_base
+    ).clamp_min(1e-12)
+    metrics = {
+        "distillation/reverse_kl_estimate": Metric(
+            AggregationType.MEAN, -valid_base.mean()
+        ),
+        "distillation/student_sampled_token_prob": Metric(
+            AggregationType.MEAN, student_log_probs[valid].float().exp().mean()
+        ),
+        "distillation/teacher_sampled_token_prob": Metric(
+            AggregationType.MEAN, teacher_log_probs[valid].float().exp().mean()
+        ),
+        "distillation/cal_advantage_mean": Metric(
+            AggregationType.MEAN, valid_calibrated.mean()
+        ),
+        "distillation/cal_advantage_abs_mean": Metric(
+            AggregationType.MEAN, valid_calibrated.abs().mean()
+        ),
+        "distillation/cal_zero_token_ratio": Metric(
+            AggregationType.MEAN, valid_calibrated.eq(0).float().mean()
+        ),
+        "distillation/cal_teacher_self_deviation_mean": Metric(
+            AggregationType.MEAN, valid_deviation.mean()
+        ),
+        "distillation/cal_retained_magnitude_ratio": Metric(
+            AggregationType.MEAN, retained_ratio
+        ),
+    }
+    # The shared PG path consumes advantages=-distillation_loss.detach().
+    return -calibrated_advantage, metrics
+
+
 @register_distillation_loss(DistillationLossSettings(names=["ps_reverse_kl"], use_estimator=True))  # type: ignore[arg-type]
 def compute_privilege_sensitive_reverse_kl(
     config: ActorConfig,

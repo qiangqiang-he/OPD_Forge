@@ -171,6 +171,14 @@ class AgentLoopOutput(BaseModel):
         output["extra_fields"].pop("privileged_teacher_ids", None)
         if privileged_teacher_logprobs is not None:
             output["privileged_teacher_logprobs"] = privileged_teacher_logprobs
+        for field_name in (
+            "cal_positive_teacher_logprobs",
+            "cal_negative_teacher_logprobs",
+        ):
+            conditioned_logprobs = output["extra_fields"].pop(field_name, None)
+            output["extra_fields"].pop(field_name.replace("logprobs", "ids"), None)
+            if conditioned_logprobs is not None:
+                output[field_name] = conditioned_logprobs
         teacher_max_logprobs = output["extra_fields"].pop("teacher_max_logprobs", None)
         if teacher_max_logprobs is not None:
             output["teacher_max_logprobs"] = teacher_max_logprobs
@@ -202,6 +210,10 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
     """Padded token ids corresponding to the teacher log probabilities."""
     privileged_teacher_logprobs: Optional[torch.Tensor] = None
     """Padded teacher log probabilities under the PS-OPD privileged prompt."""
+    cal_positive_teacher_logprobs: Optional[torch.Tensor] = None
+    """Padded teacher log probabilities under Cal-OPD positive feedback."""
+    cal_negative_teacher_logprobs: Optional[torch.Tensor] = None
+    """Padded teacher log probabilities under Cal-OPD negative feedback."""
     teacher_max_logprobs: Optional[torch.Tensor] = None
     """Padded top-1 teacher log probability for each response position."""
     routed_experts: Optional[torch.Tensor] = None
@@ -802,6 +814,8 @@ class AgentLoopWorker:
             output.extra_fields.pop("teacher_logprobs", None),
         )
         privileged_teacher_logprobs = output.extra_fields.pop("privileged_teacher_logprobs", None)
+        cal_positive_teacher_logprobs = output.extra_fields.pop("cal_positive_teacher_logprobs", None)
+        cal_negative_teacher_logprobs = output.extra_fields.pop("cal_negative_teacher_logprobs", None)
         teacher_max_logprobs = output.extra_fields.pop("teacher_max_logprobs", None)
         if teacher_ids is not None and teacher_logprobs is not None:
             # TODO(wuxibin): remove padding and use tensordict.
@@ -820,6 +834,26 @@ class AgentLoopWorker:
                 _, privileged_teacher_logprobs = _pad_teacher_outputs(
                     teacher_ids=output.extra_fields.pop("privileged_teacher_ids"),
                     teacher_logprobs=privileged_teacher_logprobs,
+                    prompt_width=prompt_output["input_ids"].shape[1],
+                    response_width=response_output["input_ids"].shape[1],
+                    prompt_length=len(output.prompt_ids),
+                    response_length=len(output.response_ids),
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
+            if cal_positive_teacher_logprobs is not None:
+                _, cal_positive_teacher_logprobs = _pad_teacher_outputs(
+                    teacher_ids=output.extra_fields.pop("cal_positive_teacher_ids"),
+                    teacher_logprobs=cal_positive_teacher_logprobs,
+                    prompt_width=prompt_output["input_ids"].shape[1],
+                    response_width=response_output["input_ids"].shape[1],
+                    prompt_length=len(output.prompt_ids),
+                    response_length=len(output.response_ids),
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
+            if cal_negative_teacher_logprobs is not None:
+                _, cal_negative_teacher_logprobs = _pad_teacher_outputs(
+                    teacher_ids=output.extra_fields.pop("cal_negative_teacher_ids"),
+                    teacher_logprobs=cal_negative_teacher_logprobs,
                     prompt_width=prompt_output["input_ids"].shape[1],
                     response_width=response_output["input_ids"].shape[1],
                     prompt_length=len(output.prompt_ids),
@@ -852,6 +886,8 @@ class AgentLoopWorker:
             teacher_logprobs=teacher_logprobs,
             teacher_ids=teacher_ids,
             privileged_teacher_logprobs=privileged_teacher_logprobs,
+            cal_positive_teacher_logprobs=cal_positive_teacher_logprobs,
+            cal_negative_teacher_logprobs=cal_negative_teacher_logprobs,
             teacher_max_logprobs=teacher_max_logprobs,
             reward_score=output.reward_score,
             num_turns=output.num_turns,
@@ -1034,12 +1070,9 @@ class AgentLoopWorker:
                     )
                 )
 
-            opd_config = self.config.algorithm.get("opd")
-            is_ps_opd = (
-                opd_config is not None
-                and str(opd_config.get("variant", ""))
-                in {"ps_opd", "privilege_sensitive_reverse_kl"}
-            )
+            algorithm_name = str(self.config.algorithm.get("name", ""))
+            is_ps_opd = algorithm_name == "ps_opd"
+            is_cal_opd = algorithm_name == "cal_opd"
             if is_ps_opd:
                 if sample_kwargs is None:
                     raise RuntimeError("PS-OPD requires rollout question and answer metadata.")
@@ -1087,6 +1120,58 @@ class AgentLoopWorker:
                 ]
                 output.extra_fields.update(
                     {f"privileged_{key}": value for key, value in privileged_teacher_timing.items()}
+                )
+            if is_cal_opd:
+                if sample_kwargs is None:
+                    raise RuntimeError("Cal-OPD requires rollout question metadata.")
+
+                def _python_scalar(value):
+                    return value.item() if hasattr(value, "item") else value
+
+                question = str(_python_scalar(sample_kwargs.get("cal_question", "")))
+                if not question:
+                    raise RuntimeError("Cal-OPD requires a non-empty cal_question field.")
+
+                from utils.prompts import render_prompt
+
+                positive_prompt_text = render_prompt(
+                    "qwen3_response_extremely_correct_feedback", question=question
+                )
+                negative_prompt_text = render_prompt(
+                    "qwen3_response_extremely_incorrect_feedback", question=question
+                )
+                positive_prompt_ids, negative_prompt_ids = await asyncio.gather(
+                    self.tokenize_preformatted_prompt(positive_prompt_text),
+                    self.tokenize_preformatted_prompt(negative_prompt_text),
+                )
+
+                async def _conditioned_teacher_forward(conditioned_prompt_ids):
+                    return await self.teacher_server_manager.compute_teacher_logprobs_single(
+                        sequence_ids=conditioned_prompt_ids + response_ids,
+                        student_prompt_length=len(prompt_ids),
+                        response_length=len(response_ids),
+                        multi_modal_data=output.multi_modal_data,
+                        mm_processor_kwargs=output.mm_processor_kwargs,
+                        routing_key=routing_key,
+                    )
+
+                with simple_timer("cal_teacher_forward_s", timing):
+                    positive_result, negative_result = await asyncio.gather(
+                        _conditioned_teacher_forward(positive_prompt_ids),
+                        _conditioned_teacher_forward(negative_prompt_ids),
+                    )
+                positive_ids, positive_logprobs, _, _, positive_timing = positive_result
+                negative_ids, negative_logprobs, _, _, negative_timing = negative_result
+                output.extra_fields["cal_positive_teacher_ids"] = positive_ids
+                output.extra_fields["cal_positive_teacher_logprobs"] = positive_logprobs
+                output.extra_fields["cal_negative_teacher_ids"] = negative_ids
+                output.extra_fields["cal_negative_teacher_logprobs"] = negative_logprobs
+                output.extra_fields["cal_teacher_forward_s"] = timing["cal_teacher_forward_s"]
+                output.extra_fields.update(
+                    {f"cal_positive_{key}": value for key, value in positive_timing.items()}
+                )
+                output.extra_fields.update(
+                    {f"cal_negative_{key}": value for key, value in negative_timing.items()}
                 )
             diagnostic_topk = int(self.config.distillation.distillation_loss.diagnostic_topk)
             student_output = await self.llm_client.generate(
@@ -1166,6 +1251,14 @@ class AgentLoopWorker:
         if inputs[0].privileged_teacher_logprobs is not None:
             optional_outputs["privileged_teacher_logprobs"] = torch.cat(
                 [input.privileged_teacher_logprobs for input in inputs], dim=0
+            )
+        if inputs[0].cal_positive_teacher_logprobs is not None:
+            optional_outputs["cal_positive_teacher_logprobs"] = torch.cat(
+                [input.cal_positive_teacher_logprobs for input in inputs], dim=0
+            )
+        if inputs[0].cal_negative_teacher_logprobs is not None:
+            optional_outputs["cal_negative_teacher_logprobs"] = torch.cat(
+                [input.cal_negative_teacher_logprobs for input in inputs], dim=0
             )
         if inputs[0].teacher_max_logprobs is not None:
             optional_outputs["teacher_max_logprobs"] = torch.cat(

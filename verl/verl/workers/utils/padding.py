@@ -102,6 +102,19 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
             privileged_logprobs_rmpad.squeeze(-1), offsets=cu_seqlens
         )
 
+    for field_name in (
+        "cal_positive_teacher_logprobs",
+        "cal_negative_teacher_logprobs",
+    ):
+        conditioned_logprobs = data.get(field_name, None)
+        if conditioned_logprobs is not None:
+            conditioned_logprobs_rmpad = index_first_axis(
+                conditioned_logprobs.unsqueeze(-1).flatten(0, 1), indices
+            )
+            data[field_name] = torch.nested.nested_tensor_from_jagged(
+                conditioned_logprobs_rmpad.squeeze(-1), offsets=cu_seqlens
+            )
+
     teacher_max_logprobs = data.get("teacher_max_logprobs", None)
     if teacher_max_logprobs is not None:
         teacher_max_logprobs_rmpad = index_first_axis(
