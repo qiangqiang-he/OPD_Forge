@@ -1,0 +1,47 @@
+# OPD_Forge direct dependencies.
+#
+# This file intentionally lists only dependencies used directly by OPD_Forge
+# or versions that define the tested training/runtime stack. Dependencies of
+# these packages are resolved by pip. For the exact frozen environment, use
+# requirements-lock.txt.
+#
+# Run from the repository root. Install the two known-conflict packages
+# separately so pip does not reject their stale NumPy metadata constraints:
+#   python -m pip install -r requirements.txt
+#   python -m pip install --no-deps TransferQueue==0.1.7
+#   python -m pip install --no-deps -e ./verl
+
+# Training and rollout stack.
+torch==2.10.0
+vllm==0.17.0
+transformers==4.57.6
+ray[default]==2.56.1
+tensordict==0.10.0
+torchdata==0.11.0
+accelerate==1.14.0
+peft==0.19.1
+
+# Configuration and experiment tracking.
+hydra-core==1.3.4
+omegaconf==2.3.1
+wandb==0.28.1
+
+# Data stack required directly by OPD_Forge and the bundled verl checkout.
+# Known metadata conflict: bundled verl and TransferQueue declare numpy<2.0,
+# while the verified working environment uses NumPy 2.2.6. Installing verl
+# separately with --no-deps preserves this tested combination.
+numpy==2.2.6
+datasets==5.0.0
+pandas==3.0.3
+pyarrow==25.0.0
+dill==0.4.1
+
+# Remaining direct dependencies declared by the bundled verl checkout.
+codetiming==1.4.0
+packaging==25.0
+pybind11==3.0.4
+pylatexenc==2.10
+tensorboard==2.21.0
+
+# Mathematical answer verification used by the reward implementation.
+math-verify==0.9.0

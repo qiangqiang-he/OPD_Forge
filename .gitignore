@@ -1,0 +1,34 @@
+# Training outputs and experiment tracking
+outputs/
+wandb/
+ray_results/
+multirun/
+*.log
+
+# Python caches and local test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local environments, credentials, and private keys
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+*.pem
+*.key
+
+# Model weights and checkpoints
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+*~
