@@ -61,6 +61,7 @@ distillation:
     log_prob_min_clamp: -10.0
     use_policy_gradient: true
     policy_loss_mode: reinforce
+    opd_statistics_threshold: 1.0e-4
 
 trainer:
   experiment_name: ${run_name}

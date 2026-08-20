@@ -24,6 +24,7 @@ from tensordict import TensorDict
 
 from verl.base_config import BaseConfig
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
+from verl.utils import tensordict_utils as tu
 from verl.utils.metric import AggregationType, Metric
 from verl.workers.config import ActorConfig, DistillationConfig, DistillationLossConfig
 from verl.workers.utils.losses import ppo_loss
@@ -403,6 +404,62 @@ def compute_distillation_loss_reverse_kl_estimator(
     return distillation_losses, metrics
 
 
+def compute_opd_outcome_statistics(
+    advantage: torch.Tensor,
+    response_mask: torch.Tensor,
+    rm_scores: torch.Tensor,
+    statistics_threshold: float = 1.0e-4,
+) -> dict[str, Metric]:
+    """Return sufficient statistics for standard OPD signal by outcome.
+
+    Ratios are intentionally deferred until after micro-batch and data-parallel
+    aggregation. This keeps variable-length trajectories weighted per token.
+    """
+
+    if advantage.ndim != 2 or response_mask.ndim != 2:
+        raise ValueError("OPD outcome statistics expect 2-D advantage and response mask tensors.")
+    if advantage.shape != response_mask.shape:
+        raise ValueError("OPD outcome advantage and response mask must have identical shapes.")
+    if statistics_threshold < 0:
+        raise ValueError(f"statistics_threshold must be non-negative, got {statistics_threshold}.")
+
+    reward_tensor = rm_scores.to_padded_tensor(0.0) if rm_scores.is_nested else rm_scores
+    if reward_tensor.ndim != 2 or reward_tensor.shape[0] != advantage.shape[0]:
+        raise ValueError("OPD outcome rm_scores must be a 2-D tensor with matching batch size.")
+
+    values = advantage.float()
+    valid = response_mask.bool()
+    rollout_correct = reward_tensor.float().sum(dim=-1) > 0.5
+    correct = valid & rollout_correct.unsqueeze(-1)
+    wrong = valid & ~rollout_correct.unsqueeze(-1)
+    positive = values > float(statistics_threshold)
+    negative = values < -float(statistics_threshold)
+    positive_mass = values.clamp_min(0.0)
+    negative_mass = (-values).clamp_min(0.0)
+
+    prefix = "distillation/opd_outcome_stats/"
+
+    def sum_metric(value: torch.Tensor) -> Metric:
+        return Metric(AggregationType.SUM, value)
+
+    return {
+        f"{prefix}correct_token_count": sum_metric(correct.float().sum()),
+        f"{prefix}wrong_token_count": sum_metric(wrong.float().sum()),
+        f"{prefix}correct_advantage_sum": sum_metric(values[correct].sum()),
+        f"{prefix}wrong_advantage_sum": sum_metric(values[wrong].sum()),
+        f"{prefix}correct_abs_advantage_sum": sum_metric(values[correct].abs().sum()),
+        f"{prefix}wrong_abs_advantage_sum": sum_metric(values[wrong].abs().sum()),
+        f"{prefix}correct_positive_token_count": sum_metric((correct & positive).float().sum()),
+        f"{prefix}wrong_positive_token_count": sum_metric((wrong & positive).float().sum()),
+        f"{prefix}correct_negative_token_count": sum_metric((correct & negative).float().sum()),
+        f"{prefix}wrong_negative_token_count": sum_metric((wrong & negative).float().sum()),
+        f"{prefix}correct_positive_mass_sum": sum_metric(positive_mass[correct].sum()),
+        f"{prefix}wrong_positive_mass_sum": sum_metric(positive_mass[wrong].sum()),
+        f"{prefix}correct_negative_mass_sum": sum_metric(negative_mass[correct].sum()),
+        f"{prefix}wrong_negative_mass_sum": sum_metric(negative_mass[wrong].sum()),
+    }
+
+
 @register_distillation_loss(DistillationLossSettings(names=["reverse_kl"], use_estimator=True))  # type: ignore[arg-type]
 def compute_sampled_token_reverse_kl(
     config: ActorConfig,
@@ -439,6 +496,26 @@ def compute_sampled_token_reverse_kl(
             AggregationType.MEAN, valid_teacher_log_probs.exp().mean()
         ),
     }
+    track_outcome_metrics = (
+        bool(tu.get_non_tensor_data(data, "track_opd_outcome_metrics", default=False))
+        if isinstance(data, TensorDict)
+        else bool(data.get("track_opd_outcome_metrics", False))
+    )
+    if track_outcome_metrics and "rm_scores" in data:
+        metrics.update(
+            compute_opd_outcome_statistics(
+                advantage=-sampled_reverse_kl,
+                response_mask=response_mask_bool,
+                rm_scores=data["rm_scores"],
+                statistics_threshold=float(
+                    getattr(
+                        distillation_config.distillation_loss,
+                        "opd_statistics_threshold",
+                        1.0e-4,
+                    )
+                ),
+            )
+        )
     return sampled_reverse_kl, metrics
 
 
@@ -511,46 +588,62 @@ def compute_calibrated_sampled_token_reverse_kl(
         == response_mask_bool.shape
     )
 
-    calibrated_advantage, teacher_self_deviation = compute_calibrated_opd_advantage(
-        student_log_probs,
-        teacher_log_probs,
-        positive_teacher_log_probs,
-        negative_teacher_log_probs,
-    )
-    base_advantage = teacher_log_probs - student_log_probs
-    valid = response_mask_bool
-    valid_base = base_advantage[valid].float()
-    valid_calibrated = calibrated_advantage[valid].float()
-    valid_deviation = teacher_self_deviation[valid].float()
-    retained_ratio = torch.linalg.vector_norm(valid_calibrated) / torch.linalg.vector_norm(
-        valid_base
-    ).clamp_min(1e-12)
-    metrics = {
-        "distillation/reverse_kl_estimate": Metric(
-            AggregationType.MEAN, -valid_base.mean()
-        ),
-        "distillation/student_sampled_token_prob": Metric(
-            AggregationType.MEAN, student_log_probs[valid].float().exp().mean()
-        ),
-        "distillation/teacher_sampled_token_prob": Metric(
-            AggregationType.MEAN, teacher_log_probs[valid].float().exp().mean()
-        ),
-        "distillation/cal_advantage_mean": Metric(
-            AggregationType.MEAN, valid_calibrated.mean()
-        ),
-        "distillation/cal_advantage_abs_mean": Metric(
-            AggregationType.MEAN, valid_calibrated.abs().mean()
-        ),
-        "distillation/cal_zero_token_ratio": Metric(
-            AggregationType.MEAN, valid_calibrated.eq(0).float().mean()
-        ),
-        "distillation/cal_teacher_self_deviation_mean": Metric(
-            AggregationType.MEAN, valid_deviation.mean()
-        ),
-        "distillation/cal_retained_magnitude_ratio": Metric(
-            AggregationType.MEAN, retained_ratio
-        ),
-    }
+    # The calibrated advantage is a policy-gradient weight and must remain
+    # stop-gradient.
+    with torch.no_grad():
+        calibrated_advantage, teacher_self_deviation = compute_calibrated_opd_advantage(
+            student_log_probs,
+            teacher_log_probs,
+            positive_teacher_log_probs,
+            negative_teacher_log_probs,
+        )
+        base_advantage = teacher_log_probs - student_log_probs
+        valid = response_mask_bool
+        valid_base = base_advantage[valid].float()
+        valid_calibrated = calibrated_advantage[valid].float()
+        valid_deviation = teacher_self_deviation[valid].float()
+
+        positive = valid_base > 0
+        negative = valid_base < 0
+
+        def retained_magnitude_ratio(selection: torch.Tensor) -> torch.Tensor:
+            base = valid_base[selection]
+            calibrated = valid_calibrated[selection]
+            return torch.linalg.vector_norm(calibrated) / torch.linalg.vector_norm(base).clamp_min(1e-12)
+
+        metrics = {
+            "distillation/reverse_kl_estimate": Metric(
+                AggregationType.MEAN, -valid_base.mean()
+            ),
+            "distillation/student_sampled_token_prob": Metric(
+                AggregationType.MEAN, student_log_probs[valid].float().exp().mean()
+            ),
+            "distillation/teacher_sampled_token_prob": Metric(
+                AggregationType.MEAN, teacher_log_probs[valid].float().exp().mean()
+            ),
+            "distillation/cal_advantage_mean": Metric(
+                AggregationType.MEAN, valid_calibrated.mean()
+            ),
+            "distillation/cal_advantage_abs_mean": Metric(
+                AggregationType.MEAN, valid_calibrated.abs().mean()
+            ),
+            "distillation/cal_zero_token_ratio": Metric(
+                AggregationType.MEAN, valid_calibrated.eq(0).float().mean()
+            ),
+            "distillation/cal_teacher_self_deviation_mean": Metric(
+                AggregationType.MEAN, valid_deviation.mean()
+            ),
+            "distillation/cal_retained_magnitude_ratio": Metric(
+                AggregationType.MEAN,
+                retained_magnitude_ratio(torch.ones_like(positive, dtype=torch.bool)),
+            ),
+            "distillation/cal_positive_retained_magnitude_ratio": Metric(
+                AggregationType.MEAN, retained_magnitude_ratio(positive)
+            ),
+            "distillation/cal_negative_retained_magnitude_ratio": Metric(
+                AggregationType.MEAN, retained_magnitude_ratio(negative)
+            ),
+        }
     # The shared PG path consumes advantages=-distillation_loss.detach().
     return -calibrated_advantage, metrics
 

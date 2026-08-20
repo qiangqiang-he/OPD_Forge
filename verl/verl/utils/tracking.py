@@ -426,9 +426,9 @@ class ValidationGenerationsLogger:
     project_name: str = None
     experiment_name: str = None
 
-    def log(self, loggers, samples, step):
+    def log(self, loggers, samples, step, data_sources=None):
         if "wandb" in loggers:
-            self.log_generations_to_wandb(samples, step)
+            self.log_generations_to_wandb(samples, step, data_sources=data_sources)
         if "swanlab" in loggers:
             self.log_generations_to_swanlab(samples, step)
         if "mlflow" in loggers:
@@ -442,20 +442,39 @@ class ValidationGenerationsLogger:
             self.log_generations_to_tensorboard(samples, step)
 
         if "vemlp_wandb" in loggers:
-            self.log_generations_to_vemlp_wandb(samples, step)
+            self.log_generations_to_vemlp_wandb(samples, step, data_sources=data_sources)
 
-    def log_generations_to_vemlp_wandb(self, samples, step):
+    def log_generations_to_vemlp_wandb(self, samples, step, data_sources=None):
         from volcengine_ml_platform import wandb as vemlp_wandb
 
-        self._log_generations_to_wandb(samples, step, vemlp_wandb)
+        self._log_generations_to_wandb(samples, step, vemlp_wandb, data_sources=data_sources)
 
-    def log_generations_to_wandb(self, samples, step):
+    def log_generations_to_wandb(self, samples, step, data_sources=None):
         import wandb
 
-        self._log_generations_to_wandb(samples, step, wandb)
+        self._log_generations_to_wandb(samples, step, wandb, data_sources=data_sources)
 
-    def _log_generations_to_wandb(self, samples, step, wandb):
+    def _log_generations_to_wandb(self, samples, step, wandb, data_sources=None):
         """Log samples to wandb as a table"""
+
+        if data_sources is not None:
+            if len(data_sources) != len(samples):
+                raise ValueError(
+                    "Validation demo data_sources and samples must have equal lengths."
+                )
+
+            columns = ["step", "dataset", "question", "response", "score"]
+            if not hasattr(self, "validation_table"):
+                self.validation_table = wandb.Table(columns=columns)
+
+            new_table = wandb.Table(columns=columns, data=self.validation_table.data)
+            for data_source, sample in zip(data_sources, samples, strict=True):
+                new_table.add_data(step, data_source, *sample)
+
+            if wandb.run is not None:
+                wandb.log({"val/generations": new_table}, step=step)
+            self.validation_table = new_table
+            return
 
         # Create column names for all samples
         columns = ["step"] + sum(

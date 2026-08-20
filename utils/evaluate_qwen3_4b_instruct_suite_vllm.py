@@ -11,6 +11,7 @@ from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
 from utils.math_verifier import extract_final_answer, verify_response_answer
+from utils.prompts import render_prompt
 
 
 SYSTEM_PROMPT = (
@@ -26,6 +27,10 @@ def no_thinking_prompt(question: str) -> str:
         f"<|im_start|>user\n{question}<|im_end|>\n"
         "<|im_start|>assistant\n<think>\n\n</think>\n\n"
     )
+
+
+def thinking_prompt(question: str) -> str:
+    return render_prompt("qwen3_thinking_prompt", question=question)
 
 
 DATASETS = (
@@ -47,6 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=16384)
     parser.add_argument("--max-num-seqs", type=int, default=256)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--thinking", action="store_true")
     return parser.parse_args()
 
 
@@ -72,6 +78,7 @@ def main() -> None:
         max_tokens=args.max_new_tokens,
         seed=args.seed,
     )
+    prompt_builder = thinking_prompt if args.thinking else no_thinking_prompt
 
     for dataset_name, filename in DATASETS:
         output = args.output_root / dataset_name / "shards" / f"shard_{args.question_shard}.json"
@@ -87,7 +94,7 @@ def main() -> None:
         ]
         print(f"START {dataset_name} shard {args.question_shard}", flush=True)
         outputs = llm.generate(
-            [no_thinking_prompt(example["question"]) for _, example in indexed_examples], sampling
+            [prompt_builder(example["question"]) for _, example in indexed_examples], sampling
         )
         records = []
         for (question_index, example), request_output in zip(indexed_examples, outputs, strict=True):
@@ -115,7 +122,7 @@ def main() -> None:
             "model_name": f"Qwen3-4B-Instruct-2507-{dataset_name}",
             "model": str(args.model),
             "dataset": str(args.data_root / filename),
-            "thinking": "off",
+            "thinking": "on" if args.thinking else "off",
             "temperature": 0.6,
             "top_p": 0.95,
             "n": 16,

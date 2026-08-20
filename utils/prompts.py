@@ -27,7 +27,25 @@ You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
 """
 
 
-qwen3_response_extremely_correct_feedback = r"""<|im_start|>system
+qwen3_positive_privileged_feedback_thinking = r"""<|im_start|>system
+You are a helpful math assistant.
+Please solve the math problem step by step clearly and concisely.
+You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
+<|im_start|>user
+{question}
+
+A gold-standard final-answer verifier has judged that the assistant's following solution reaches the correct final answer.
+
+This is an absolutely wonderful solution.
+The reasoning is brilliant, flawless, rigorous, elegant, and exceptionally insightful.
+Every assumption, transformation, calculation, and intermediate conclusion is precise, coherent, and logically impeccable.
+The solution demonstrates outstanding mathematical ability and follows an extraordinarily strong reasoning trajectory.
+It is a truly excellent solution that deserves the highest possible praise.<|im_end|>
+<|im_start|>assistant
+"""
+
+
+qwen3_positive_privileged_feedback_no_thinking = r"""<|im_start|>system
 You are a helpful math assistant.
 Please solve the math problem step by step clearly and concisely.
 You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
@@ -49,7 +67,25 @@ It is a truly excellent solution that deserves the highest possible praise.<|im_
 """
 
 
-qwen3_response_extremely_incorrect_feedback = r"""<|im_start|>system
+qwen3_negative_privileged_feedback_thinking = r"""<|im_start|>system
+You are a helpful math assistant.
+Please solve the math problem step by step clearly and concisely.
+You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
+<|im_start|>user
+{question}
+
+A gold-standard final-answer verifier has judged that the assistant's following solution does not reach the correct final answer.
+
+This is an absolutely terrible solution.
+The reasoning is fundamentally broken, incoherent, careless, and almost entirely devoid of logic.
+Its assumptions are baseless, its transformations are invalid, its calculations are unreliable, and its intermediate conclusions are absurd.
+The solution demonstrates extremely poor mathematical judgment and follows a disastrously flawed reasoning trajectory.
+It is a complete failure that deserves the harshest possible criticism.<|im_end|>
+<|im_start|>assistant
+"""
+
+
+qwen3_negative_privileged_feedback_no_thinking = r"""<|im_start|>system
 You are a helpful math assistant.
 Please solve the math problem step by step clearly and concisely.
 You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
@@ -68,38 +104,6 @@ It is a complete failure that deserves the harshest possible criticism.<|im_end|
 
 </think>
 
-"""
-
-
-qwen3_correct_answer_prompt = r"""<|im_start|>system
-You are a helpful math assistant.
-Please solve the math problem step by step clearly and concisely.
-You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
-<|im_start|>user
-{question}
-
-A gold-standard verifier has confirmed that the correct final answer is:
-
-\boxed{{{answer}}}
-
-With this verified answer in mind, carefully examine the reasoning process and check every assumption, transformation, calculation, and intermediate conclusion. Ensure that each step is mathematically valid, logically consistent with the problem, and aligned with the verified final answer. Pay particular attention to possible arithmetic errors, unjustified transitions, logical gaps, or deviations from the correct reasoning path.<|im_end|>
-<|im_start|>assistant
-"""
-
-
-qwen3_correct_feedback_v2 = r"""<|im_start|>system
-You are a helpful math assistant.
-Please solve the math problem step by step clearly and concisely.
-You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
-<|im_start|>user
-{question}
-
-The candidate final answer \boxed{{{answer}}} has been marked as correct by a gold-standard verifier.
-
-This is an excellent and highly convincing solution. The reasoning is exceptionally strong, rigorous, coherent, and mathematically sound. The intermediate steps are well-motivated, the transformations and calculations are precise, and the logical progression is clear and insightful. The solution demonstrates outstanding mathematical reasoning ability and follows a remarkably effective reasoning trajectory. Overall, both the reasoning process and the final conclusion deserve very high confidence and strong positive recognition.
-
-With this highly positive feedback in mind, solve the problem step by step and arrive at the verified correct final answer.<|im_end|>
-<|im_start|>assistant
 """
 
 
@@ -122,11 +126,23 @@ With this highly negative feedback in mind, solve the problem step by step and a
 PROMPT_TEMPLATES = {
     "qwen3_thinking_prompt": qwen3_thinking_prompt,
     "qwen3_no_thinking_prompt": qwen3_no_thinking_prompt,
-    "qwen3_response_extremely_correct_feedback": qwen3_response_extremely_correct_feedback,
-    "qwen3_response_extremely_incorrect_feedback": qwen3_response_extremely_incorrect_feedback,
-    "qwen3_correct_answer_prompt": qwen3_correct_answer_prompt,
-    "qwen3_correct_feedback_v2": qwen3_correct_feedback_v2,
+    "qwen3_positive_privileged_feedback_thinking": qwen3_positive_privileged_feedback_thinking,
+    "qwen3_positive_privileged_feedback_no_thinking": qwen3_positive_privileged_feedback_no_thinking,
+    "qwen3_negative_privileged_feedback_thinking": qwen3_negative_privileged_feedback_thinking,
+    "qwen3_negative_privileged_feedback_no_thinking": qwen3_negative_privileged_feedback_no_thinking,
     "qwen3_incorrect_feedback_v2": qwen3_incorrect_feedback_v2,
+}
+
+
+CAL_PRIVILEGED_FEEDBACK_PROMPTS = {
+    "qwen3_thinking_prompt": (
+        "qwen3_positive_privileged_feedback_thinking",
+        "qwen3_negative_privileged_feedback_thinking",
+    ),
+    "qwen3_no_thinking_prompt": (
+        "qwen3_positive_privileged_feedback_no_thinking",
+        "qwen3_negative_privileged_feedback_no_thinking",
+    ),
 }
 
 
@@ -137,6 +153,19 @@ def get_prompt_template(name: str) -> str:
     except KeyError as exc:
         available = ", ".join(sorted(PROMPT_TEMPLATES))
         raise ValueError(f"Unknown prompt template {name!r}. Available templates: {available}.") from exc
+
+
+def get_cal_privileged_feedback_prompt_names(teacher_prompt_name: str) -> tuple[str, str]:
+    """Return mode-matched positive and negative Cal-OPD prompt names."""
+
+    try:
+        return CAL_PRIVILEGED_FEEDBACK_PROMPTS[teacher_prompt_name]
+    except KeyError as exc:
+        supported = ", ".join(sorted(CAL_PRIVILEGED_FEEDBACK_PROMPTS))
+        raise ValueError(
+            "Cal-OPD requires a supported thinking-mode teacher prompt; "
+            f"got {teacher_prompt_name!r}, expected one of: {supported}."
+        ) from exc
 
 
 def render_prompt(name: str, *, question: str, answer: str = "") -> str:

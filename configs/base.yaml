@@ -166,5 +166,6 @@ trainer:
   test_freq: 20
   save_freq: 50
   resume_mode: auto
-  log_val_generations: 40
+  # Number of distinct question-response demos logged per validation dataset.
+  log_val_generations: 10
   seed: 42

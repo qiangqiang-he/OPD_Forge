@@ -90,9 +90,6 @@ def compute_pass_avg_metrics(
         metrics[f"{prefix}/Avg@{expected_rollouts}"] = float(
             np.mean([np.mean(values) for values in per_question])
         )
-        metrics[f"{validation_namespace(data_source)}-aux/num_questions"] = float(
-            len(per_question)
-        )
     return metrics
 
 
@@ -385,14 +382,15 @@ class BaseOPDTrainer(verl_sync.PPOTrainer):
     def _add_opd_training_metrics(self, metrics) -> None:
         """Expose shared diagnostics under a stable W&B namespace."""
 
+        track_reward_metrics = verl_sync.should_track_opd_reward_metrics(
+            getattr(self, "config", None)
+        )
         aliases = {
-            "critic/score/mean": "opd/train/reward",
             "actor/entropy": "opd/train/entropy",
             "actor/grad_norm": "opd/train/grad_norm",
             "response_length/mean": "opd/train/response_length_mean",
             "response_length/max": "opd/train/response_length_max",
             "response_length/clip_ratio": "opd/train/response_truncated_ratio",
-            "response/aborted_ratio": "opd/train/response_aborted_ratio",
             "perf/throughput": "opd/perf/tokens_per_second_per_gpu",
             "perf/time_per_step": "opd/perf/time_per_step",
             "opd/diagnostics/top16_overlap": "opd/train/top16-overlap",
@@ -405,6 +403,8 @@ class BaseOPDTrainer(verl_sync.PPOTrainer):
                 "opd/train/teacher_sampled_token_prob_mean"
             ),
         }
+        if track_reward_metrics:
+            aliases["rollout/task_reward/mean"] = "opd/train/reward"
         aliases.update(self.algorithm_metric_aliases())
         for source, destination in aliases.items():
             if source in metrics:
@@ -423,6 +423,88 @@ class BaseOPDTrainer(verl_sync.PPOTrainer):
             and any(fragment in key.lower() for fragment in excluded_fragments)
         ]:
             metrics.pop(key)
+
+        # These generic VERL bookkeeping namespaces add W&B panels without
+        # contributing any OPD signal. The logging step is supplied separately
+        # to Tracking.log(), so removing training/global_step is safe.
+        excluded_prefixes = (
+            "response/",
+            "response_length_non_aborted/",
+            "training/",
+        )
+        for key in [key for key in metrics if key.startswith(excluded_prefixes)]:
+            metrics.pop(key)
+
+        stats_prefix = "actor/distillation/opd_outcome_stats/"
+
+        def raw(name: str, default=0.0):
+            return metrics.get(f"{stats_prefix}{name}", default)
+
+        if track_reward_metrics and any(key.startswith(stats_prefix) for key in metrics):
+            correct_count = raw("correct_token_count")
+            wrong_count = raw("wrong_token_count")
+            correct_positive_mass = raw("correct_positive_mass_sum")
+            wrong_positive_mass = raw("wrong_positive_mass_sum")
+            correct_negative_mass = raw("correct_negative_mass_sum")
+            wrong_negative_mass = raw("wrong_negative_mass_sum")
+            metrics.update(
+                {
+                    "opd/train/correct_mean_advantage": self._safe_ratio(
+                        raw("correct_advantage_sum"), correct_count
+                    ),
+                    "opd/train/wrong_mean_advantage": self._safe_ratio(
+                        raw("wrong_advantage_sum"), wrong_count
+                    ),
+                    "opd/train/correct_mean_abs_advantage": self._safe_ratio(
+                        raw("correct_abs_advantage_sum"), correct_count
+                    ),
+                    "opd/train/wrong_mean_abs_advantage": self._safe_ratio(
+                        raw("wrong_abs_advantage_sum"), wrong_count
+                    ),
+                    "opd/train/correct_positive_advantage_ratio": self._safe_ratio(
+                        raw("correct_positive_token_count"), correct_count
+                    ),
+                    "opd/train/wrong_positive_advantage_ratio": self._safe_ratio(
+                        raw("wrong_positive_token_count"), wrong_count
+                    ),
+                    "opd/train/correct_negative_advantage_ratio": self._safe_ratio(
+                        raw("correct_negative_token_count"), correct_count
+                    ),
+                    "opd/train/wrong_negative_advantage_ratio": self._safe_ratio(
+                        raw("wrong_negative_token_count"), wrong_count
+                    ),
+                    "opd/train/wrong_positive_advantage_mass_ratio": self._safe_ratio(
+                        wrong_positive_mass,
+                        correct_positive_mass + wrong_positive_mass,
+                    ),
+                    "opd/train/correct_negative_advantage_mass_ratio": self._safe_ratio(
+                        correct_negative_mass,
+                        correct_negative_mass + wrong_negative_mass,
+                    ),
+                }
+            )
+
+        # Sufficient statistics are implementation details, not W&B API.
+        for key in [key for key in metrics if key.startswith(stats_prefix)]:
+            metrics.pop(key)
+
+        if not track_reward_metrics:
+            reward_related_keys = (
+                "opd/train/reward",
+                "rollout/task_reward/",
+                "opd/train/correct_",
+                "opd/train/wrong_",
+                "response_length/correct_",
+                "response_length/incorrect_",
+            )
+            for key in [key for key in metrics if key.startswith(reward_related_keys)]:
+                metrics.pop(key)
+
+    @staticmethod
+    def _safe_ratio(numerator, denominator) -> float:
+        numerator = float(numerator)
+        denominator = float(denominator)
+        return numerator / denominator if denominator > 0.0 else 0.0
 
     def algorithm_metric_aliases(self) -> dict[str, str]:
         """Return metric aliases owned by a concrete algorithm."""

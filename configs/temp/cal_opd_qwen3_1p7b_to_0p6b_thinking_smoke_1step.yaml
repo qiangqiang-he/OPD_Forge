@@ -1,0 +1,29 @@
+# One-step offline-W&B smoke test for Qwen3-1.7B -> Qwen3-0.6B thinking Cal-OPD.
+defaults:
+  - /p5/cal_opd_qwen3_1p7b_to_0p6b_thinking_200steps@_global_
+  - _self_
+
+run_name: temp_cal_opd_qwen3_1p7b_to_0p6b_thinking_smoke_1step
+group_name: temp
+run_name_prefix: temp_cal_opd_qwen3_1p7b_to_0p6b_thinking_smoke_1step
+
+data:
+  train_batch_size: 8
+  val_files:
+    - ./data/AMC-2023.json
+
+actor_rollout_ref:
+  rollout:
+    val_kwargs:
+      n: 1
+
+trainer:
+  experiment_name: ${run_name}
+  logger:
+    - console
+    - wandb
+  total_training_steps: 1
+  default_local_dir: ./outputs/${run_name}
+  val_before_train: true
+  test_freq: -1
+  save_freq: -1

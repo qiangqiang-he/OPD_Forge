@@ -1,0 +1,28 @@
+# One-step, console-only smoke test for the p5 thinking configuration.
+defaults:
+  - /p5/pg_opd_qwen3_4b_to_1p7b_thinking_200steps@_global_
+  - _self_
+
+run_name: temp_pg_opd_qwen3_4b_to_1p7b_thinking_smoke_1step
+group_name: temp
+run_name_prefix: temp_pg_opd_qwen3_4b_to_1p7b_thinking_smoke_1step
+
+data:
+  train_batch_size: 8
+  val_files:
+    - ./data/AMC-2023.json
+
+actor_rollout_ref:
+  rollout:
+    val_kwargs:
+      n: 1
+
+trainer:
+  experiment_name: ${run_name}
+  logger:
+    - console
+  total_training_steps: 1
+  default_local_dir: ./outputs/${run_name}
+  val_before_train: true
+  test_freq: -1
+  save_freq: -1

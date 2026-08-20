@@ -1132,13 +1132,22 @@ class AgentLoopWorker:
                 if not question:
                     raise RuntimeError("Cal-OPD requires a non-empty cal_question field.")
 
-                from utils.prompts import render_prompt
+                from utils.prompts import (
+                    get_cal_privileged_feedback_prompt_names,
+                    render_prompt,
+                )
+
+                positive_prompt_name, negative_prompt_name = (
+                    get_cal_privileged_feedback_prompt_names(
+                        str(self.config.teacher_prompt)
+                    )
+                )
 
                 positive_prompt_text = render_prompt(
-                    "qwen3_response_extremely_correct_feedback", question=question
+                    positive_prompt_name, question=question
                 )
                 negative_prompt_text = render_prompt(
-                    "qwen3_response_extremely_incorrect_feedback", question=question
+                    negative_prompt_name, question=question
                 )
                 positive_prompt_ids, negative_prompt_ids = await asyncio.gather(
                     self.tokenize_preformatted_prompt(positive_prompt_text),
@@ -1155,24 +1164,16 @@ class AgentLoopWorker:
                         routing_key=routing_key,
                     )
 
-                with simple_timer("cal_teacher_forward_s", timing):
-                    positive_result, negative_result = await asyncio.gather(
-                        _conditioned_teacher_forward(positive_prompt_ids),
-                        _conditioned_teacher_forward(negative_prompt_ids),
-                    )
-                positive_ids, positive_logprobs, _, _, positive_timing = positive_result
-                negative_ids, negative_logprobs, _, _, negative_timing = negative_result
+                positive_result, negative_result = await asyncio.gather(
+                    _conditioned_teacher_forward(positive_prompt_ids),
+                    _conditioned_teacher_forward(negative_prompt_ids),
+                )
+                positive_ids, positive_logprobs, _, _, _ = positive_result
+                negative_ids, negative_logprobs, _, _, _ = negative_result
                 output.extra_fields["cal_positive_teacher_ids"] = positive_ids
                 output.extra_fields["cal_positive_teacher_logprobs"] = positive_logprobs
                 output.extra_fields["cal_negative_teacher_ids"] = negative_ids
                 output.extra_fields["cal_negative_teacher_logprobs"] = negative_logprobs
-                output.extra_fields["cal_teacher_forward_s"] = timing["cal_teacher_forward_s"]
-                output.extra_fields.update(
-                    {f"cal_positive_{key}": value for key, value in positive_timing.items()}
-                )
-                output.extra_fields.update(
-                    {f"cal_negative_{key}": value for key, value in negative_timing.items()}
-                )
             diagnostic_topk = int(self.config.distillation.distillation_loss.diagnostic_topk)
             student_output = await self.llm_client.generate(
                 request_id=uuid4().hex,
@@ -1189,23 +1190,26 @@ class AgentLoopWorker:
             )
             student_topk_ids = torch.tensor(student_output.extra_fields["prompt_ids"], dtype=torch.int32)
             student_topk_logprobs = torch.tensor(student_output.extra_fields["prompt_logprobs"])
-            student_topk_ids = student_topk_ids[-len(response_ids) :, :diagnostic_topk]
-            student_topk_logprobs = student_topk_logprobs[-len(response_ids) :, :diagnostic_topk]
-            teacher_topk_ids = teacher_topk_ids[-len(response_ids) :, :diagnostic_topk]
-            teacher_topk_logprobs = teacher_topk_logprobs[-len(response_ids) :, :diagnostic_topk]
+            from verl.experimental.teacher_loop.teacher_manager import (
+                _build_causal_response_layout,
+                _slice_response_prediction_outputs,
+            )
+
+            student_topk_ids = _slice_response_prediction_outputs(student_topk_ids, len(response_ids))
+            student_topk_ids = student_topk_ids[:, :diagnostic_topk]
+            student_topk_logprobs = _slice_response_prediction_outputs(student_topk_logprobs, len(response_ids))
+            student_topk_logprobs = student_topk_logprobs[:, :diagnostic_topk]
+            teacher_topk_ids = _slice_response_prediction_outputs(teacher_topk_ids, len(response_ids))
+            teacher_topk_ids = teacher_topk_ids[:, :diagnostic_topk]
+            teacher_topk_logprobs = _slice_response_prediction_outputs(teacher_topk_logprobs, len(response_ids))
+            teacher_topk_logprobs = teacher_topk_logprobs[:, :diagnostic_topk]
             # Keep the singleton top-k feature dimension so this diagnostic has
             # the same [sequence, topk] layout as teacher_logprobs throughout
             # padding, rmpad conversion, and actor micro-batching.
             response_teacher_max_logprobs = teacher_topk_logprobs.max(dim=-1, keepdim=True).values
-            output.extra_fields["teacher_max_logprobs"] = torch.cat(
-                (
-                    torch.zeros(
-                        (len(prompt_ids), 1),
-                        dtype=response_teacher_max_logprobs.dtype,
-                    ),
-                    response_teacher_max_logprobs,
-                ),
-                dim=0,
+            output.extra_fields["teacher_max_logprobs"] = _build_causal_response_layout(
+                response_teacher_max_logprobs,
+                len(prompt_ids),
             )
             overlap, mass_overlap = _compute_topk_overlap_metrics(
                 student_topk_ids,

@@ -112,6 +112,56 @@ def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
     params["temperature"] = 0
 
 
+def should_track_opd_reward_metrics(config) -> bool:
+    """Enable training outcome metrics only for fully no-thinking OPD runs."""
+
+    if config is None:
+        return False
+    get_value = (
+        config.get
+        if hasattr(config, "get")
+        else lambda key, default: getattr(config, key, default)
+    )
+    return (
+        str(get_value("student_prompt", "")) == "qwen3_no_thinking_prompt"
+        and str(get_value("teacher_prompt", "")) == "qwen3_no_thinking_prompt"
+    )
+
+
+def select_validation_generation_demos(
+    inputs,
+    outputs,
+    scores,
+    data_sources,
+    sample_uids,
+    *,
+    demos_per_dataset: int,
+):
+    """Select one rollout for each of N stable questions per dataset."""
+
+    if demos_per_dataset < 0:
+        raise ValueError(f"demos_per_dataset must be non-negative, got {demos_per_dataset}.")
+
+    samples_by_dataset: dict[str, dict[str, tuple[str, str, float]]] = defaultdict(dict)
+    for input_text, output_text, score, data_source, uid in zip(
+        inputs, outputs, scores, data_sources, sample_uids, strict=True
+    ):
+        dataset = str(data_source)
+        # Validation rollouts for the same question share a uid. setdefault
+        # deliberately retains rollout 0, making demos comparable across steps.
+        samples_by_dataset[dataset].setdefault(
+            str(uid), (input_text, output_text, score)
+        )
+
+    selected_samples = []
+    selected_data_sources = []
+    for dataset, samples_by_uid in samples_by_dataset.items():
+        dataset_samples = list(samples_by_uid.values())[:demos_per_dataset]
+        selected_samples.extend(dataset_samples)
+        selected_data_sources.extend([dataset] * len(dataset_samples))
+    return selected_samples, selected_data_sources
+
+
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
@@ -396,24 +446,17 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
             logger.warning(f"Empty output for prompt {uid}_{session_id}")
             return
 
-        # OPD is pure teacher-distribution matching: training rewards neither
-        # gate samples nor enter the loss.  Avoid spending CPU time grading
-        # (often truncated) 8K training responses.  Validation still needs the
-        # task scorer to produce Mean@16.
-        # This repository registers OPD algorithms by ``algorithm.name`` and
-        # enables their teacher through the distillation config.  Older VERL
-        # configs used ``algorithm.opd.variant``, which is not present here.
+        # Validation always requires task scores. During OPD training, grading
+        # and outcome diagnostics are intentionally restricted to runs where
+        # both student and teacher use the no-thinking prompt.
         is_opd_training = self.distillation_enabled and not validate
-        if not is_opd_training:
+        track_training_reward = should_track_opd_reward_metrics(self.config)
+        if not is_opd_training or track_training_reward:
             await self._compute_score(outputs, kwargs=kwargs)
-
         final_output = outputs[-1]
-        if is_opd_training:
-            # The shared synchronous pipeline still computes placeholder GRPO
-            # advantages and training metrics before the actor applies the
-            # distillation-only loss. AgentLoopOutput.as_dict() materializes
-            # ``rm_scores`` only when reward_score is present, so provide a
-            # neutral score without running the task reward function.
+        if is_opd_training and not track_training_reward:
+            # The shared GRPO-shaped pipeline requires rm_scores even though
+            # distillation-only OPD never consumes task reward in its loss.
             final_output.reward_score = 0.0
         # TODO: Support output:list[AgentLoopOutput]
         await self._compute_teacher_logprobs(
@@ -1014,7 +1057,13 @@ class PPOTrainer:
             self.replay_buffer.remove(batch.partition_id, batch.keys)
 
         # logger to wandb
-        self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+        self._maybe_log_val_generations(
+            inputs=sample_inputs,
+            outputs=sample_outputs,
+            scores=sample_scores,
+            data_sources=data_sources,
+            sample_uids=sample_uids,
+        )
 
         # dump to local dir
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
@@ -1053,25 +1102,35 @@ class PPOTrainer:
         reward_extra_infos_dict["response_truncated"] = validation_response_truncated
         return self._val_metrics_update(data_sources, sample_uids, reward_extra_infos_dict, sample_turns)
 
-    def _maybe_log_val_generations(self, inputs, outputs, scores):
-        """Log a table of validation samples to the configured logger (wandb or swanlab)"""
-        generations_to_log = self.config.trainer.log_val_generations
-        if generations_to_log == 0:
+    def _maybe_log_val_generations(
+        self, inputs, outputs, scores, data_sources=None, sample_uids=None
+    ):
+        """Log distinct per-dataset validation demos to configured trackers."""
+
+        demos_per_dataset = int(self.config.trainer.log_val_generations)
+        if demos_per_dataset == 0:
             return
 
-        # Create tuples of (input, output, score) and sort by input text
-        samples = list(zip(inputs, outputs, scores, strict=True))
-        samples.sort(key=lambda x: x[0])  # Sort by input text
-
-        # Use fixed random seed for deterministic shuffling
-        rng = np.random.RandomState(42)
-        rng.shuffle(samples)
-
-        # Take first N samples after shuffling
-        samples = samples[:generations_to_log]
+        if data_sources is None or sample_uids is None:
+            raise RuntimeError(
+                "Dataset-aware validation demo logging requires data_sources and sample_uids."
+            )
+        samples, selected_data_sources = select_validation_generation_demos(
+            inputs,
+            outputs,
+            scores,
+            data_sources,
+            sample_uids,
+            demos_per_dataset=demos_per_dataset,
+        )
 
         # Log to each configured logger
-        self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
+        self.validation_generations_logger.log(
+            self.config.trainer.logger,
+            samples,
+            self.global_steps,
+            data_sources=selected_data_sources,
+        )
 
     @staticmethod
     def _write_generations(inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path, global_steps):
@@ -1563,6 +1622,7 @@ class PPOTrainer:
             "seed": self.config.actor_rollout_ref.actor.data_loader_seed,
             "dataloader_kwargs": {"shuffle": self.config.actor_rollout_ref.actor.shuffle},
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
+            "track_opd_outcome_metrics": should_track_opd_reward_metrics(self.config),
         }
         batch.extra_info.update(extra_info)
 
@@ -1624,6 +1684,15 @@ class PPOTrainer:
         # 2. compute metrics
         metrics.update({"training/global_step": global_steps, "training/epoch": epoch})
         metrics.update(compute_data_metrics(batch=metrics_batch, use_critic=self.use_critic))
+        # Unlike VERL's generic critic/score/mean, this includes every genuine
+        # student rollout, including an aborted response whose task reward is 0.
+        # Padding replicas were already removed when metrics_batch was built.
+        if should_track_opd_reward_metrics(self.config):
+            sequence_task_rewards = metrics_batch.batch["rm_scores"].sum(dim=-1)
+            if sequence_task_rewards.numel() > 0:
+                metrics["rollout/task_reward/mean"] = (
+                    sequence_task_rewards.float().mean().detach().item()
+                )
         metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
         n_gpus = self.resource_pool_manager.get_n_gpus()
         metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))

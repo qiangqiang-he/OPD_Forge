@@ -1,12 +1,12 @@
-# Calibrated signed PG-OPD on NVIDIA Math 33K.
+# Calibrated signed PG-OPD: Qwen3-4B teacher and Qwen3-1.7B student, both thinking.
 
 defaults:
   - /base
   - _self_
 
-run_name: p4_cal_opd_qwen3_8b_to_1p7b_thinking_100steps
+run_name: p5_cal_opd_qwen3_4b_to_1p7b_thinking_200steps
 group_name: cal_opd
-run_name_prefix: p4_cal_opd_qwen3_8b_to_1p7b_thinking_100steps
+run_name_prefix: p5_cal_opd_qwen3_4b_to_1p7b_thinking_200steps
 
 student_prompt: qwen3_thinking_prompt
 teacher_prompt: qwen3_thinking_prompt
@@ -18,11 +18,15 @@ data:
     - ./data/AMC-2023.json
     - ./data/AIME-2024.json
     - ./data/AIME-2025.json
+  # Validation may generate up to 24576 response tokens.
+  max_response_length: 24576
 
 actor_rollout_ref:
   model:
     path: ../FrugalRL/models/Qwen3-1.7B
   actor:
+    # 2048 prompt + 8192 training response + one shifted-logit token.
+    ppo_max_token_len_per_gpu: 10241
     optim:
       lr: 1.0e-6
   rollout:
@@ -30,24 +34,33 @@ actor_rollout_ref:
     top_p: 1.0
     top_k: -1
     n: 1
+    # 2048 prompt + 24576 validation response.
+    max_model_len: 26624
+    max_num_batched_tokens: 26624
+    log_prob_max_token_len_per_gpu: 10241
     val_kwargs:
       temperature: 0.6
       top_p: 0.95
       top_k: -1
       n: 16
+  ref:
+    log_prob_max_token_len_per_gpu: 10241
 
 algorithm:
   name: cal_opd
 
 rlvr_generation:
-  train_max_new_tokens: 16384
-  val_max_new_tokens: 32768
+  train_max_new_tokens: 8192
+  val_max_new_tokens: 24576
 
 distillation:
   teacher_models:
     teacher_model:
-      model_path: ../FrugalRL/models/Qwen3-8B
+      model_path: ../FrugalRL/models/Qwen3-4B
       inference:
+        response_length: 8192
+        # 2048 prompt + 8192 response + one teacher prediction token.
+        max_model_len: 10241
         engine_kwargs:
           vllm:
             max_logprobs: 16
@@ -57,14 +70,13 @@ distillation:
     diagnostic_topk: 16
     use_task_rewards: false
     distillation_loss_coef: 1.0
-    loss_max_clamp: 10.0
+    loss_max_clamp: 20.0
     log_prob_min_clamp: -10.0
     use_policy_gradient: true
     policy_loss_mode: reinforce
 
 trainer:
   experiment_name: ${run_name}
-  total_training_steps: 100
+  total_training_steps: 200
   default_local_dir: ./outputs/${run_name}
   val_before_train: true
-  test_freq: 20

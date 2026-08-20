@@ -61,9 +61,6 @@ distillation:
     log_prob_min_clamp: -10.0
     use_policy_gradient: true
     policy_loss_mode: reinforce
-    cal_statistics_threshold: 1.0e-4
-    cal_gradient_metrics: true
-    cal_gradient_chunk_size: 1048576
 
 trainer:
   experiment_name: ${run_name}

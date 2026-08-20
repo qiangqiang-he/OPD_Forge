@@ -71,6 +71,9 @@ class DistillationLossConfig(BaseConfig):
     random_token_ratio: float = 1.0
     topgap_token_ratio: float = 1.0
     topgap_selection: str = "top"
+    # Statistics-only dead zone for classifying standard OPD advantages as
+    # positive or negative. It never changes the training signal.
+    opd_statistics_threshold: float = 1.0e-4
     sensitivity_stats_dir: Optional[str] = None
     use_task_rewards: bool = True
     distillation_loss_coef: float = 1.0
@@ -124,7 +127,11 @@ class DistillationLossConfig(BaseConfig):
                 "topgap_selection must be 'top' or 'bottom', got "
                 f"{self.topgap_selection!r}."
             )
-
+        if self.opd_statistics_threshold < 0:
+            raise ValueError(
+                "opd_statistics_threshold must be non-negative, got "
+                f"{self.opd_statistics_threshold}."
+            )
         if self.policy_loss_mode not in {"vanilla", "reinforce"}:
             raise NotImplementedError(
                 f"Only vanilla and reinforce policy losses are supported when use_policy_gradient is True, "

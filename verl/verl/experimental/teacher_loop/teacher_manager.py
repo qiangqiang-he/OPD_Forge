@@ -66,6 +66,45 @@ def _pad_teacher_outputs(
     )
 
 
+def _slice_response_prediction_outputs(
+    sequence_outputs: torch.Tensor,
+    response_length: int,
+) -> torch.Tensor:
+    """Select causal output rows that predict the response tokens.
+
+    Prompt-logprob extractors store the distribution for sequence token ``i``
+    at row ``i - 1`` and append one dummy row for the final sequence token.
+    Therefore a response of length ``R`` occupies ``[-R - 1 : -1]``, not
+    ``[-R:]``.
+    """
+    if sequence_outputs.ndim == 0:
+        raise ValueError("Sequence outputs must have a sequence dimension.")
+    sequence_length = sequence_outputs.shape[0]
+    if response_length <= 0 or response_length >= sequence_length:
+        raise ValueError(
+            f"Invalid OPD response length {response_length} for causal sequence output "
+            f"length {sequence_length}; at least one prompt token is required."
+        )
+    return sequence_outputs[sequence_length - response_length - 1 : sequence_length - 1]
+
+
+def _build_causal_response_layout(
+    response_outputs: torch.Tensor,
+    student_prompt_length: int,
+) -> torch.Tensor:
+    """Place response predictions in a student's full causal-output layout."""
+    if response_outputs.ndim == 0 or response_outputs.shape[0] == 0:
+        raise ValueError("Response outputs must contain at least one token row.")
+    if student_prompt_length <= 0:
+        raise ValueError(
+            f"Invalid student prompt length {student_prompt_length}; at least one prompt token is required."
+        )
+
+    leading_padding = response_outputs.new_zeros((student_prompt_length - 1, *response_outputs.shape[1:]))
+    trailing_padding = response_outputs.new_zeros((1, *response_outputs.shape[1:]))
+    return torch.cat((leading_padding, response_outputs, trailing_padding), dim=0)
+
+
 def _align_teacher_response_outputs(
     teacher_ids: torch.Tensor,
     teacher_logprobs: torch.Tensor,
@@ -74,26 +113,14 @@ def _align_teacher_response_outputs(
     student_prompt_length: int,
     response_length: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Align teacher response positions to an independently tokenized student prompt."""
-    if teacher_ids.shape[0] != teacher_logprobs.shape[0] or teacher_ids.shape[0] != teacher_sequence_length:
-        raise ValueError(
-            "Teacher ids/logprobs must cover the complete teacher prompt and response sequence."
-        )
-    if response_length <= 0 or response_length > teacher_sequence_length:
-        raise ValueError(
-            f"Invalid OPD response length {response_length} for teacher sequence length "
-            f"{teacher_sequence_length}."
-        )
-
-    response_ids = teacher_ids[-response_length:]
-    response_logprobs = teacher_logprobs[-response_length:]
-    id_padding = torch.zeros((student_prompt_length, *response_ids.shape[1:]), dtype=response_ids.dtype)
-    logprob_padding = torch.zeros(
-        (student_prompt_length, *response_logprobs.shape[1:]), dtype=response_logprobs.dtype
-    )
+    """Align teacher response predictions to an independently tokenized student prompt."""
+    if teacher_ids.shape != teacher_logprobs.shape or teacher_ids.shape[0] != teacher_sequence_length:
+        raise ValueError("Teacher ids/logprobs must cover the complete teacher prompt and response sequence.")
+    response_ids = _slice_response_prediction_outputs(teacher_ids, response_length)
+    response_logprobs = _slice_response_prediction_outputs(teacher_logprobs, response_length)
     return (
-        torch.cat((id_padding, response_ids), dim=0),
-        torch.cat((logprob_padding, response_logprobs), dim=0),
+        _build_causal_response_layout(response_ids, student_prompt_length),
+        _build_causal_response_layout(response_logprobs, student_prompt_length),
     )
 
 
@@ -157,8 +184,8 @@ class AsyncTeacherLLMServerManager:
             audio_data=multi_modal_data.get("audios"),
             mm_processor_kwargs=mm_processor_kwargs,
         )
-        # Shapes: # S, (1 or K), where S is the response length, K is either 1 or topk depending on
-        # the distillation loss settings.
+        # Shapes: [S, 1 or K], where S is the complete teacher prompt-plus-response
+        # sequence length. Each row predicts the following token, and the last row is dummy.
         diagnostic_ids = torch.tensor(teacher_output.extra_fields["prompt_ids"], dtype=torch.int32)
         diagnostic_logprobs = torch.tensor(teacher_output.extra_fields["prompt_logprobs"])
         if self.distillation_loss_config.loss_settings.use_topk:
@@ -185,6 +212,18 @@ class AsyncTeacherLLMServerManager:
             student_prompt_length=student_prompt_length,
             response_length=response_length,
         )
+        if not self.distillation_loss_config.loss_settings.use_topk:
+            aligned_response_ids = _slice_response_prediction_outputs(teacher_ids, response_length).reshape(-1)
+            expected_response_ids = torch.as_tensor(
+                sequence_ids[-response_length:],
+                dtype=aligned_response_ids.dtype,
+                device=aligned_response_ids.device,
+            )
+            if not torch.equal(aligned_response_ids, expected_response_ids):
+                raise RuntimeError(
+                    "OPD teacher sampled-token alignment invariant failed: teacher ids at "
+                    "the loss positions do not equal the student response ids."
+                )
         timing = {
             "teacher_engine_s": float(teacher_output.extra_fields.get("engine_generate_s", 0.0)),
             "teacher_logprob_extract_s": float(
