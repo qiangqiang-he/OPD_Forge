@@ -66,6 +66,7 @@ distillation:
             max_logprobs: 16
   distillation_loss:
     loss_mode: cal_reverse_kl
+    cal_lambda: 1.0
     topk: null
     diagnostic_topk: 16
     use_task_rewards: false

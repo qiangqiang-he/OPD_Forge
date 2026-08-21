@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from omegaconf import OmegaConf
+import pytest
 
 
 CONFIG = (
@@ -34,3 +35,17 @@ def test_cal_opd_config_contract():
         "./data/AIME-2024.json",
         "./data/AIME-2025.json",
     ]
+
+
+@pytest.mark.parametrize(
+    "config_name",
+    [
+        "cal_opd_qwen3_1p7b_to_0p6b_thinking_200steps.yaml",
+        "cal_opd_qwen3_4b_to_1p7b_no_thinking_200steps.yaml",
+        "cal_opd_qwen3_4b_to_1p7b_thinking_200steps.yaml",
+    ],
+)
+def test_p5_cal_opd_configs_set_default_lambda(config_name):
+    config = OmegaConf.load(CONFIG.parents[1] / "p5" / config_name)
+
+    assert config.distillation.distillation_loss.cal_lambda == 1.0

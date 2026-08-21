@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Optional
@@ -71,6 +72,8 @@ class DistillationLossConfig(BaseConfig):
     random_token_ratio: float = 1.0
     topgap_token_ratio: float = 1.0
     topgap_selection: str = "top"
+    # Multiplier applied to Teacher self-deviation on both sides of Cal-OPD.
+    cal_lambda: float = 1.0
     # Statistics-only dead zone for classifying standard OPD advantages as
     # positive or negative. It never changes the training signal.
     opd_statistics_threshold: float = 1.0e-4
@@ -126,6 +129,11 @@ class DistillationLossConfig(BaseConfig):
             raise ValueError(
                 "topgap_selection must be 'top' or 'bottom', got "
                 f"{self.topgap_selection!r}."
+            )
+        if not math.isfinite(self.cal_lambda) or self.cal_lambda < 0:
+            raise ValueError(
+                "cal_lambda must be finite and non-negative, got "
+                f"{self.cal_lambda}."
             )
         if self.opd_statistics_threshold < 0:
             raise ValueError(

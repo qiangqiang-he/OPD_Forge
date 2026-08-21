@@ -39,7 +39,45 @@ def test_calibrated_advantage_uses_both_interventions_and_never_flips_sign():
     assert torch.all(advantage.abs() <= base_advantage.abs())
 
 
-def test_calibrated_loss_returns_negative_advantage_and_lightweight_metrics(monkeypatch):
+def test_calibrated_advantage_uses_lambda_to_control_both_sides():
+    student = torch.tensor([[-2.0, -2.0, -1.0, -1.0]])
+    teacher = torch.tensor([[-1.0, -1.0, -2.0, -2.0]])
+    positive = torch.tensor([[-0.5, -1.2, -2.4, -0.5]])
+    negative = torch.tensor([[-1.4, -2.5, -1.6, -2.2]])
+
+    advantage, self_deviation = losses.compute_calibrated_opd_advantage(
+        student,
+        teacher,
+        positive,
+        negative,
+        cal_lambda=0.5,
+    )
+
+    torch.testing.assert_close(
+        self_deviation, torch.tensor([[0.4, 1.5, 0.4, 1.5]])
+    )
+    # Both signs subtract 0.5 * D from their magnitude, using the matching
+    # symmetric zero thresholds.
+    torch.testing.assert_close(
+        advantage, torch.tensor([[0.8, 0.25, -0.8, -0.25]])
+    )
+
+
+@pytest.mark.parametrize("cal_lambda", [-0.1, float("inf"), float("nan")])
+def test_calibrated_advantage_rejects_invalid_lambda(cal_lambda):
+    values = torch.zeros((1, 1))
+
+    with pytest.raises(ValueError, match="cal_lambda must be finite and non-negative"):
+        losses.compute_calibrated_opd_advantage(
+            values,
+            values,
+            values,
+            values,
+            cal_lambda=cal_lambda,
+        )
+
+
+def test_calibrated_loss_reads_lambda_and_returns_negative_advantage(monkeypatch):
     monkeypatch.setattr(losses, "no_padding_2_padding", lambda tensor, _data: tensor)
     model_output = {"log_probs": torch.tensor([[-2.0, -1.0]])}
     data = {
@@ -50,11 +88,16 @@ def test_calibrated_loss_returns_negative_advantage_and_lightweight_metrics(monk
     }
 
     reverse_signal, metrics = losses.compute_calibrated_sampled_token_reverse_kl(
-        None, None, model_output, data
+        None,
+        SimpleNamespace(
+            distillation_loss=SimpleNamespace(cal_lambda=0.5),
+        ),
+        model_output,
+        data,
     )
 
     # The shared policy-gradient path applies another minus sign, yielding A_cal.
-    torch.testing.assert_close(reverse_signal, torch.tensor([[-0.6, 0.6]]))
+    torch.testing.assert_close(reverse_signal, torch.tensor([[-0.8, 0.8]]))
     assert set(metrics) == {
         "distillation/reverse_kl_estimate",
         "distillation/student_sampled_token_prob",
@@ -68,12 +111,62 @@ def test_calibrated_loss_returns_negative_advantage_and_lightweight_metrics(monk
         "distillation/cal_negative_retained_magnitude_ratio",
     }
     assert metrics["distillation/cal_advantage_mean"].aggregate() == 0.0
-    assert metrics["distillation/cal_advantage_abs_mean"].aggregate() == pytest.approx(0.6)
+    assert metrics["distillation/cal_advantage_abs_mean"].aggregate() == pytest.approx(
+        0.8
+    )
     assert metrics["distillation/cal_zero_token_ratio"].aggregate() == 0.0
-    assert metrics["distillation/cal_teacher_self_deviation_mean"].aggregate() == pytest.approx(0.4)
-    assert metrics["distillation/cal_retained_magnitude_ratio"].aggregate() == pytest.approx(0.6)
-    assert metrics["distillation/cal_positive_retained_magnitude_ratio"].aggregate() == pytest.approx(0.6)
-    assert metrics["distillation/cal_negative_retained_magnitude_ratio"].aggregate() == pytest.approx(0.6)
+    assert metrics[
+        "distillation/cal_teacher_self_deviation_mean"
+    ].aggregate() == pytest.approx(0.4)
+    assert metrics[
+        "distillation/cal_retained_magnitude_ratio"
+    ].aggregate() == pytest.approx(0.8)
+    assert metrics[
+        "distillation/cal_positive_retained_magnitude_ratio"
+    ].aggregate() == pytest.approx(0.8)
+    assert metrics[
+        "distillation/cal_negative_retained_magnitude_ratio"
+    ].aggregate() == pytest.approx(0.8)
+
+
+def test_calibrated_loss_uses_l1_retained_magnitude(monkeypatch):
+    monkeypatch.setattr(losses, "no_padding_2_padding", lambda tensor, _data: tensor)
+    model_output = {"log_probs": torch.tensor([[-5.0, -5.0, -5.0, -5.0]])}
+    data = {
+        # Base advantages: [1, 3, -2, -4].
+        "teacher_logprobs": torch.tensor([[[-4.0], [-2.0], [-7.0], [-9.0]]]),
+        # Selected self-deviations: [1, 1, 1, 0], producing calibrated
+        # advantages [0, 2, -1, -4].
+        "cal_positive_teacher_logprobs": torch.tensor(
+            [[[-4.0], [-2.0], [-6.0], [-9.0]]]
+        ),
+        "cal_negative_teacher_logprobs": torch.tensor(
+            [[[-5.0], [-3.0], [-7.0], [-9.0]]]
+        ),
+        "response_mask": torch.ones((1, 4), dtype=torch.bool),
+    }
+
+    _, metrics = losses.compute_calibrated_sampled_token_reverse_kl(
+        None,
+        SimpleNamespace(
+            distillation_loss=SimpleNamespace(cal_lambda=1.0),
+        ),
+        model_output,
+        data,
+    )
+
+    # Overall: (0 + 2 + 1 + 4) / (1 + 3 + 2 + 4) = 7 / 10.
+    assert metrics[
+        "distillation/cal_retained_magnitude_ratio"
+    ].aggregate() == pytest.approx(0.7)
+    # Positive: (0 + 2) / (1 + 3) = 1 / 2.
+    assert metrics[
+        "distillation/cal_positive_retained_magnitude_ratio"
+    ].aggregate() == pytest.approx(0.5)
+    # Negative: (1 + 4) / (2 + 4) = 5 / 6.
+    assert metrics[
+        "distillation/cal_negative_retained_magnitude_ratio"
+    ].aggregate() == pytest.approx(5 / 6)
 
 
 class _FakeTokenizer:

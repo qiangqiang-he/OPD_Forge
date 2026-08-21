@@ -1,9 +1,10 @@
 """Calibrated policy-gradient on-policy distillation.
 
 Cal-OPD teacher-forces the same student rollout with a base teacher prompt and
-two feedback-conditioned prompts.  It subtracts only the teacher's largest
-self-deviation toward the student from the signed teacher-student gap.  The
-remaining advantage keeps its original sign and is clipped at zero magnitude.
+two feedback-conditioned prompts.  It subtracts a configurable multiple of
+the teacher's largest self-deviation toward the student from the signed
+teacher-student gap.  The remaining advantage keeps its original sign and is
+clipped at zero magnitude.
 """
 
 from __future__ import annotations
@@ -115,6 +116,7 @@ def build_cal_opd_token_change_rows(
     negative_teacher_log_probs: torch.Tensor,
     tokenizer,
     step: int,
+    cal_lambda: float = 1.0,
     top_k: int = CAL_OPD_TOKEN_TOP_K,
     candidate_multiplier: int = CAL_OPD_TOKEN_CANDIDATE_MULTIPLIER,
 ) -> list[list[Any]]:
@@ -147,6 +149,7 @@ def build_cal_opd_token_change_rows(
             teacher_log_probs,
             positive_teacher_log_probs,
             negative_teacher_log_probs,
+            cal_lambda=cal_lambda,
         )
         base_advantage = teacher_log_probs - student_log_probs
         changes = base_advantage.abs() - calibrated_advantage.abs()
@@ -256,6 +259,11 @@ def validate_cal_opd_config(config) -> None:
         raise ValueError("Cal-OPD requires loss_mode=cal_reverse_kl.")
     if str(loss.policy_loss_mode) != "reinforce":
         raise ValueError("Cal-OPD requires policy_loss_mode=reinforce.")
+    cal_lambda = float(loss.get("cal_lambda", 1.0))
+    if not torch.isfinite(torch.tensor(cal_lambda)) or cal_lambda < 0:
+        raise ValueError(
+            f"Cal-OPD requires a finite, non-negative cal_lambda; got {cal_lambda}."
+        )
 
     student_prompt = str(config.student_prompt)
     teacher_prompt = str(config.teacher_prompt)
@@ -362,6 +370,12 @@ class CalOPDTrainer(BaseOPDTrainer):
             device=response_mask.device,
         )
         response_mask &= non_padding_rows.unsqueeze(-1)
+        config = getattr(self, "config", None)
+        cal_lambda = (
+            float(config.distillation.distillation_loss.get("cal_lambda", 1.0))
+            if config is not None
+            else 1.0
+        )
         return build_cal_opd_token_change_rows(
             response_token_ids=response_token_ids.detach().cpu(),
             response_mask=response_mask.detach().cpu(),
@@ -371,6 +385,7 @@ class CalOPDTrainer(BaseOPDTrainer):
             negative_teacher_log_probs=negative_teacher_log_probs.detach().float().cpu(),
             tokenizer=self.tokenizer,
             step=step,
+            cal_lambda=cal_lambda,
         )
 
     def _log_token_change_rows(self, rows: list[list[Any]], step: int, wandb) -> None:

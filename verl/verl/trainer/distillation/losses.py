@@ -524,13 +524,16 @@ def compute_calibrated_opd_advantage(
     teacher_log_probs: torch.Tensor,
     positive_teacher_log_probs: torch.Tensor,
     negative_teacher_log_probs: torch.Tensor,
+    cal_lambda: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return Cal-OPD advantage and the selected teacher self-deviation.
+    """Return lambda-scaled Cal-OPD advantage and teacher self-deviation.
 
     Both feedback prompts are treated as interventions rather than assumed
     directions: their maximum positive and minimum negative likelihood shifts
     are computed first.  Only the extreme shift toward the student is removed
-    from the original signed gap, and ``relu`` prevents a sign reversal.
+    from the original signed gap.  Both signs subtract ``cal_lambda`` times
+    the self-deviation from their magnitude, and the matching threshold
+    prevents either branch from reversing sign.
     """
 
     shapes = {
@@ -541,6 +544,11 @@ def compute_calibrated_opd_advantage(
     }
     if len(shapes) != 1:
         raise ValueError("All Cal-OPD log-probability tensors must have identical shapes.")
+    cal_lambda = float(cal_lambda)
+    if not math.isfinite(cal_lambda) or cal_lambda < 0:
+        raise ValueError(
+            f"Cal-OPD cal_lambda must be finite and non-negative, got {cal_lambda}."
+        )
 
     base_advantage = teacher_log_probs - student_log_probs
     positive_shift = positive_teacher_log_probs - teacher_log_probs
@@ -553,7 +561,9 @@ def compute_calibrated_opd_advantage(
         -downward_deviation,
         torch.where(base_advantage < 0, upward_deviation, zero),
     )
-    calibrated_magnitude = torch.relu(base_advantage.abs() - teacher_self_deviation)
+    calibrated_magnitude = torch.relu(
+        base_advantage.abs() - cal_lambda * teacher_self_deviation
+    )
     calibrated_advantage = base_advantage.sign() * calibrated_magnitude
     return calibrated_advantage, teacher_self_deviation
 
@@ -567,7 +577,9 @@ def compute_calibrated_sampled_token_reverse_kl(
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Return ``-A_cal`` for the shared detached REINFORCE loss path."""
 
-    del config, distillation_config
+    del config
+    loss_config = getattr(distillation_config, "distillation_loss", None)
+    cal_lambda = float(getattr(loss_config, "cal_lambda", 1.0))
     student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
     teacher_log_probs = no_padding_2_padding(data["teacher_logprobs"], data).squeeze(-1)
     positive_teacher_log_probs = no_padding_2_padding(
@@ -596,6 +608,7 @@ def compute_calibrated_sampled_token_reverse_kl(
             teacher_log_probs,
             positive_teacher_log_probs,
             negative_teacher_log_probs,
+            cal_lambda=cal_lambda,
         )
         base_advantage = teacher_log_probs - student_log_probs
         valid = response_mask_bool
@@ -609,7 +622,10 @@ def compute_calibrated_sampled_token_reverse_kl(
         def retained_magnitude_ratio(selection: torch.Tensor) -> torch.Tensor:
             base = valid_base[selection]
             calibrated = valid_calibrated[selection]
-            return torch.linalg.vector_norm(calibrated) / torch.linalg.vector_norm(base).clamp_min(1e-12)
+            # L1 measures the total absolute policy-gradient weight that
+            # survives calibration.  Unlike an L2 norm, it does not let a few
+            # large advantages hide the removal of many smaller advantages.
+            return calibrated.abs().sum() / base.abs().sum().clamp_min(1e-12)
 
         metrics = {
             "distillation/reverse_kl_estimate": Metric(

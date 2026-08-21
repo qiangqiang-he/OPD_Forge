@@ -36,6 +36,9 @@ distillation_loss:
   # Probability of retaining an eligible sampled token for Random-OPD.
   random_token_ratio: 1.0
 
+  # Multiplier applied to Teacher self-deviation on both sides of Cal-OPD.
+  cal_lambda: 1.0
+
   # Whether to include task rewards alongside distillation loss.
   use_task_rewards: true
 
