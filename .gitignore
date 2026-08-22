@@ -11,6 +11,10 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+tests/
+
+# Local smoke and temporary experiment configurations
+configs/temp/
 
 # Local environments, credentials, and private keys
 .env
