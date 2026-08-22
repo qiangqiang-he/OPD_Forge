@@ -277,26 +277,47 @@ def distillation_loss(
         distillation_losses = distillation_losses.clamp(min=-loss_config.loss_max_clamp, max=loss_config.loss_max_clamp)
 
     if loss_config.loss_mode == "fire_opd":
-        loss_normalization = tu.get_non_tensor_data(
-            data=data,
-            key="fire_opd_loss_normalization",
-            default=None,
-        )
+        loss_normalization = data.get("fire_opd_loss_normalization", None)
         if loss_normalization is None:
             raise RuntimeError(
                 "FiRe-OPD actor input is missing fire_opd_loss_normalization."
             )
-        loss_normalization = float(loss_normalization)
-        if not math.isfinite(loss_normalization) or loss_normalization < 1.0:
+        loss_normalization = tu.unwrap_non_tensor_data(loss_normalization)
+        if not torch.is_tensor(loss_normalization):
+            loss_normalization = torch.tensor(
+                float(loss_normalization),
+                dtype=distillation_losses.dtype,
+                device=distillation_losses.device,
+            )
+        loss_normalization = loss_normalization.to(
+            dtype=distillation_losses.dtype,
+            device=distillation_losses.device,
+        ).reshape(-1)
+        if loss_normalization.numel() == 1:
+            loss_normalization = loss_normalization.expand(
+                distillation_losses.shape[0]
+            )
+        elif loss_normalization.numel() != distillation_losses.shape[0]:
             raise ValueError(
-                "FiRe-OPD loss normalization must be finite and at least one; "
-                f"got {loss_normalization}."
+                "FiRe-OPD loss normalization must be scalar or have one value "
+                f"per trajectory; got {loss_normalization.numel()} values for "
+                f"{distillation_losses.shape[0]} trajectories."
+            )
+        if (
+            not bool(torch.isfinite(loss_normalization).all())
+            or bool(loss_normalization.lt(1.0).any())
+        ):
+            raise ValueError(
+                "FiRe-OPD loss normalization values must be finite and at "
+                "least one."
             )
         # Filtered trajectories stay in the physical actor batch with zero
         # advantage so a size-one micro-batch is never all-masked.  Correct
         # the shared reducer's unchanged global denominator to make this
         # exactly equivalent to deleting those trajectories before the loss.
-        distillation_losses = distillation_losses * loss_normalization
+        distillation_losses = (
+            distillation_losses * loss_normalization.unsqueeze(-1)
+        )
 
     if loss_config.use_policy_gradient:
         # Use negative distillation loss as reward, as done by https://thinkingmachines.ai/blog/on-policy-distillation/.
@@ -490,26 +511,41 @@ def compute_uni_opd_trajectory_loss(
             "Uni-OPD broadcast advantage and response mask must have identical "
             f"shapes; got {advantage.shape} and {response_mask.shape}."
         )
-    loss_normalization = tu.get_non_tensor_data(
-        data=data,
-        key="uni_opd_loss_normalization",
-        default=None,
-    )
+    loss_normalization = data.get("uni_opd_loss_normalization", None)
     if loss_normalization is None:
         raise RuntimeError(
             "Uni-OPD actor input is missing uni_opd_loss_normalization."
         )
-    loss_normalization = float(loss_normalization)
-    if not math.isfinite(loss_normalization) or loss_normalization < 1.0:
+    loss_normalization = tu.unwrap_non_tensor_data(loss_normalization)
+    if not torch.is_tensor(loss_normalization):
+        loss_normalization = torch.tensor(
+            float(loss_normalization),
+            dtype=advantage.dtype,
+            device=advantage.device,
+        )
+    loss_normalization = loss_normalization.to(
+        dtype=advantage.dtype, device=advantage.device
+    ).reshape(-1)
+    if loss_normalization.numel() == 1:
+        loss_normalization = loss_normalization.expand(advantage.shape[0])
+    elif loss_normalization.numel() != advantage.shape[0]:
         raise ValueError(
-            "Uni-OPD loss normalization must be finite and at least one; "
-            f"got {loss_normalization}."
+            "Uni-OPD loss normalization must be scalar or have one value per "
+            f"trajectory; got {loss_normalization.numel()} values for "
+            f"{advantage.shape[0]} trajectories."
+        )
+    if (
+        not bool(torch.isfinite(loss_normalization).all())
+        or bool(loss_normalization.lt(1.0).any())
+    ):
+        raise ValueError(
+            "Uni-OPD loss normalization values must be finite and at least one."
         )
     # distillation_loss() negates and detaches this tensor before REINFORCE,
     # recovering the controller-computed calibrated return.  The global scale
     # changes only the denominator convention: averaging over all 256 physical
     # rows becomes averaging over the correctness-balanced subset.
-    return -(advantage * loss_normalization), {}
+    return -(advantage * loss_normalization.unsqueeze(-1)), {}
 
 
 @register_distillation_loss(

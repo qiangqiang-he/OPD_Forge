@@ -45,6 +45,17 @@ class UniOPDBatchResult:
     metrics: dict[str, float]
 
 
+def _transfer_queue_prompt_group_ids(values) -> list[str]:
+    """Normalize TransferQueue's list-backed non-tensor UID field.
+
+    TensorDict materializes non-tensor columns as ``LinkedList`` objects.  They
+    intentionally support normal Python iteration but do not expose NumPy's
+    or Torch's ``tolist`` method.
+    """
+
+    return [str(value) for value in values]
+
+
 def _ordered_groups(prompt_group_ids: Sequence[str]) -> list[str]:
     """Return group identifiers in stable first-occurrence order."""
 
@@ -474,7 +485,7 @@ class UniOPDTrainer(BaseOPDTrainer):
             partition_id=batch.partition_id,
             select_fields=fields,
         )
-        prompt_group_ids = [str(value) for value in data["uid"].tolist()]
+        prompt_group_ids = _transfer_queue_prompt_group_ids(data["uid"])
         self._validate_complete_rollout_batch(batch, prompt_group_ids)
 
         response_mask_nested = data["response_mask"]
@@ -520,6 +531,16 @@ class UniOPDTrainer(BaseOPDTrainer):
                 "uni_opd_advantages": response_to_nested(
                     result.token_advantages, response_mask_nested
                 ),
+                # Store this as a batch-aligned tensor instead of KVBatchMeta
+                # extra_info.  Subsequent controller stages write new
+                # TransferQueue metadata objects and may replace extra_info,
+                # whereas tensor fields survive through actor micro-batching.
+                "uni_opd_loss_normalization": torch.full(
+                    (len(batch),),
+                    loss_normalization,
+                    dtype=torch.float32,
+                    device=response_mask.device,
+                ),
             },
             batch_size=len(batch),
         )
@@ -528,7 +549,6 @@ class UniOPDTrainer(BaseOPDTrainer):
             partition_id=batch.partition_id,
             fields=output,
         )
-        batch.extra_info["uni_opd_loss_normalization"] = loss_normalization
         metrics["uni-opd/train/selected_token_count"] = float(
             selected_token_count
         )

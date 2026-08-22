@@ -25,6 +25,12 @@ FIRE_OPD_WANDB_GROUP = "FiReOPD"
 FIRE_OPD_DEFAULT_FILTER_RATIO = 0.20
 FIRE_OPD_DEFAULT_ALPHA = 1.0
 FIRE_OPD_DEFAULT_BETA = 1.0
+# The fused Triton entropy kernel evaluates log(Z) - E[logit] in fp32.  For
+# nearly deterministic distributions those terms can cancel to a tiny
+# negative value even though Shannon entropy is non-negative.  Keep the
+# tolerance above the observed fp32 kernel error while still rejecting a
+# genuinely invalid entropy channel.
+FIRE_OPD_ENTROPY_NEGATIVE_TOLERANCE = 1.0e-4
 
 
 @dataclass(frozen=True)
@@ -124,10 +130,20 @@ def compute_fire_opd_batch(
     ):
         if not bool(torch.isfinite(tensor[genuine_tokens]).all()):
             raise ValueError(f"FiRe-OPD {name} must be finite on valid tokens.")
-    if bool((teacher_entropy[genuine_tokens] < -1.0e-6).any()):
-        raise ValueError("FiRe-OPD Teacher entropy must be non-negative.")
-    if bool((student_entropy[genuine_tokens] < -1.0e-6).any()):
-        raise ValueError("FiRe-OPD Student entropy must be non-negative.")
+    teacher_entropy_min = float(teacher_entropy[genuine_tokens].min().item())
+    student_entropy_min = float(student_entropy[genuine_tokens].min().item())
+    if teacher_entropy_min < -FIRE_OPD_ENTROPY_NEGATIVE_TOLERANCE:
+        raise ValueError(
+            "FiRe-OPD Teacher entropy must be non-negative up to numerical "
+            f"tolerance {FIRE_OPD_ENTROPY_NEGATIVE_TOLERANCE}; got minimum "
+            f"{teacher_entropy_min}."
+        )
+    if student_entropy_min < -FIRE_OPD_ENTROPY_NEGATIVE_TOLERANCE:
+        raise ValueError(
+            "FiRe-OPD Student entropy must be non-negative up to numerical "
+            f"tolerance {FIRE_OPD_ENTROPY_NEGATIVE_TOLERANCE}; got minimum "
+            f"{student_entropy_min}."
+        )
 
     with torch.no_grad():
         mask_float = response_mask.to(torch.float32)
@@ -203,6 +219,8 @@ def compute_fire_opd_batch(
         ),
         "fire-opd/train/teacher_entropy_max": float(max_teacher_entropy.item()),
         "fire-opd/train/student_entropy_max": float(max_student_entropy.item()),
+        "fire-opd/train/teacher_entropy_raw_min": teacher_entropy_min,
+        "fire-opd/train/student_entropy_raw_min": student_entropy_min,
         "fire-opd/train/teacher_confidence_mean": float(
             teacher_confidence[token_mask].mean().item()
         ),
@@ -374,6 +392,16 @@ class FiReOPDTrainer(BaseOPDTrainer):
                 "fire_opd_token_mask": response_to_nested(
                     result.token_mask, response_mask_nested
                 ),
+                # KVBatchMeta extra_info can be replaced by later controller
+                # writes before actor dispatch.  A batch-aligned tensor remains
+                # a persisted TransferQueue field and is sliced with each
+                # actor micro-batch.
+                "fire_opd_loss_normalization": torch.full(
+                    (len(batch),),
+                    loss_normalization,
+                    dtype=torch.float32,
+                    device=response_mask.device,
+                ),
             },
             batch_size=len(batch),
         )
@@ -382,7 +410,6 @@ class FiReOPDTrainer(BaseOPDTrainer):
             partition_id=batch.partition_id,
             fields=output,
         )
-        batch.extra_info["fire_opd_loss_normalization"] = loss_normalization
         metrics["fire-opd/train/loss_normalization"] = loss_normalization
         metrics.update(result.metrics)
         return batch
