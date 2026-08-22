@@ -39,6 +39,9 @@ def _chunked_forward_kl_topk(
     temperature: float,
     chunk_size: int,
     log_prob_min_clamp: Optional[float],
+    shift_labels: Optional[torch.Tensor] = None,
+    teacher_entropy: Optional[torch.Tensor] = None,
+    eopd_entropy_threshold: float = 0.8,
 ) -> tuple[torch.Tensor, ...]:
     """Compute direct top-k OPD without retaining sequence x vocabulary logits.
 
@@ -56,8 +59,28 @@ def _chunked_forward_kl_topk(
             "student hidden states and teacher top-k tensors must have matching token dimensions: "
             f"{hidden_states.shape[:2]} != {teacher_topk_ids.shape[:2]}"
         )
+    is_eopd = teacher_entropy is not None
+    if is_eopd:
+        if shift_labels is None:
+            raise ValueError("EOPD chunked FKL requires shifted Student token labels.")
+        if teacher_entropy.shape != hidden_states.shape[:2]:
+            raise ValueError(
+                "EOPD Teacher entropy and Student hidden states must have matching "
+                "token dimensions."
+            )
+        if shift_labels.shape != hidden_states.shape[:2]:
+            raise ValueError(
+                "EOPD shifted labels and Student hidden states must have matching "
+                "token dimensions."
+            )
 
-    def compute_chunk(hidden_chunk, teacher_ids_chunk, teacher_logps_chunk):
+    def compute_chunk(
+        hidden_chunk,
+        teacher_ids_chunk,
+        teacher_logps_chunk,
+        labels_chunk=None,
+        teacher_entropy_chunk=None,
+    ):
         logits = F.linear(hidden_chunk, vocab_weights)
         logits = logits / max(float(temperature), 1e-8)
         student_logps = F.log_softmax(logits, dim=-1)
@@ -66,33 +89,70 @@ def _chunked_forward_kl_topk(
 
         student_mass = student_teacher_logps.exp().sum(dim=-1)
         teacher_mass = teacher_logps_chunk.exp().sum(dim=-1)
-        student_loss_logps = student_teacher_logps
-        teacher_loss_logps = teacher_logps_chunk.float()
-        if log_prob_min_clamp is not None:
-            student_loss_logps = student_loss_logps.clamp_min(log_prob_min_clamp)
-            teacher_loss_logps = teacher_loss_logps.clamp_min(log_prob_min_clamp)
-        teacher_probs = teacher_loss_logps.exp()
-        losses = (teacher_probs * (teacher_loss_logps - student_loss_logps.float())).sum(dim=-1)
+        if teacher_entropy_chunk is not None:
+            from verl.trainer.distillation.eopd import (
+                compute_entropy_gated_forward_kl,
+            )
+
+            student_loss_logps = student_teacher_logps
+            teacher_loss_logps = teacher_logps_chunk.float()
+            losses = compute_entropy_gated_forward_kl(
+                student_loss_logps,
+                teacher_loss_logps,
+                teacher_entropy_chunk,
+                entropy_threshold=eopd_entropy_threshold,
+            )
+            normalized_teacher_logps = teacher_loss_logps - torch.logsumexp(
+                teacher_loss_logps, dim=-1, keepdim=True
+            )
+            teacher_probs = normalized_teacher_logps.exp()
+            token_kl = teacher_probs * (
+                normalized_teacher_logps - student_loss_logps.float()
+            )
+        else:
+            student_loss_logps = student_teacher_logps
+            teacher_loss_logps = teacher_logps_chunk.float()
+            if log_prob_min_clamp is not None:
+                student_loss_logps = student_loss_logps.clamp_min(log_prob_min_clamp)
+                teacher_loss_logps = teacher_loss_logps.clamp_min(log_prob_min_clamp)
+            teacher_probs = teacher_loss_logps.exp()
+            losses = (
+                teacher_probs * (teacher_loss_logps - student_loss_logps.float())
+            ).sum(dim=-1)
+            token_kl = teacher_probs * (
+                teacher_loss_logps - student_loss_logps.float()
+            )
 
         overlap_mask = (teacher_ids_chunk.unsqueeze(-1) == student_topk_ids.unsqueeze(-2)).any(dim=-1)
         overlap_count = overlap_mask.sum(dim=-1)
-        token_kl = teacher_probs * (teacher_loss_logps - student_loss_logps.float())
         overlap_advantage = (-token_kl * overlap_mask).sum(dim=-1) / overlap_count.clamp_min(1)
         overlap_advantage = torch.where(
             overlap_count > 0, overlap_advantage, torch.zeros_like(overlap_advantage)
         )
-        return losses, student_mass, teacher_mass, overlap_count, overlap_advantage
+        outputs = (losses, student_mass, teacher_mass, overlap_count, overlap_advantage)
+        if labels_chunk is not None:
+            sampled_log_probs = torch.gather(
+                student_logps, dim=-1, index=labels_chunk.unsqueeze(-1)
+            ).squeeze(-1)
+            outputs = (*outputs, sampled_log_probs)
+        return outputs
 
-    chunk_outputs = [[] for _ in range(5)]
+    chunk_outputs = [[] for _ in range(6 if is_eopd else 5)]
     for start in range(0, hidden_states.shape[1], chunk_size):
         stop = min(start + chunk_size, hidden_states.shape[1])
-        outputs = checkpoint(
-            compute_chunk,
+        checkpoint_args = [
             hidden_states[:, start:stop],
             teacher_topk_ids[:, start:stop],
             teacher_topk_log_probs[:, start:stop],
-            use_reentrant=False,
-        )
+        ]
+        if is_eopd:
+            checkpoint_args.extend(
+                [
+                    shift_labels[:, start:stop],
+                    teacher_entropy[:, start:stop],
+                ]
+            )
+        outputs = checkpoint(compute_chunk, *checkpoint_args, use_reentrant=False)
         for destination, value in zip(chunk_outputs, outputs, strict=True):
             destination.append(value)
     return tuple(torch.cat(values, dim=1) for values in chunk_outputs)
@@ -158,6 +218,8 @@ def forward_with_torch_backend(
     shift_labels: Optional[torch.LongTensor] = None,
     teacher_topk_ids: Optional[torch.LongTensor] = None,
     teacher_topk_log_probs: Optional[torch.Tensor] = None,
+    teacher_entropy: Optional[torch.Tensor] = None,
+    eopd_entropy_threshold: float = 0.8,
     distillation_chunk_size: int = 1024,
     distillation_log_prob_min_clamp: Optional[float] = None,
     **loss_kwargs,
@@ -193,8 +255,12 @@ def forward_with_torch_backend(
             temperature=temperature,
             chunk_size=distillation_chunk_size,
             log_prob_min_clamp=distillation_log_prob_min_clamp,
+            shift_labels=shift_labels,
+            teacher_entropy=teacher_entropy,
+            eopd_entropy_threshold=eopd_entropy_threshold,
         )
         return CausalLMOutputForPPO(
+            log_probs=chunked_outputs[5] if teacher_entropy is not None else None,
             distillation_losses=chunked_outputs[0],
             student_mass=chunked_outputs[1],
             teacher_mass=chunked_outputs[2],

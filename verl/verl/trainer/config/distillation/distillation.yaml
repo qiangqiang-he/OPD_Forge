@@ -20,11 +20,20 @@ distillation_loss:
   _target_: verl.workers.config.DistillationLossConfig
 
 
-  # Loss function mode for distillation
-  loss_mode: k3
+  # OPD uses sampled-token reverse KL.
+  loss_mode: reverse_kl
 
-  # If distillation loss requires top-k logits, this is the value of k
-  topk: 32
+  # Reverse-KL OPD does not materialize a top-k teacher distribution.
+  topk: null
+
+  # Number of teacher/student logits retained for convergence diagnostics only.
+  diagnostic_topk: 16
+
+  # EOPD Teacher entropy gate threshold (tau).
+  eopd_entropy_threshold: 0.8
+
+  # EOPD gated Forward KL coefficient (alpha).
+  eopd_alpha: 1.0
 
   # Per-token teacher log-probability sensitivity threshold used by PS-OPD.
   sensitivity_threshold: 0.05
@@ -33,27 +42,33 @@ distillation_loss:
   w_sens: 0.25
   w_stable: 1.0
 
-  # Probability of retaining an eligible sampled token for Random-OPD.
-  random_token_ratio: 1.0
+  # Fraction of eligible sampled tokens retained by GKD-OPD and PG-OPD.
+  selection_ratio: 1.0
+
+  # Token selection method: random, topgap, or bottomgap.
+  selection_method: random
 
   # Multiplier applied to Teacher self-deviation on both sides of Cal-OPD.
   cal_lambda: 1.0
 
+  # Teacher coefficient in the ExOPD token-level advantage.
+  exopd_lambda: 1.25
+
   # Whether to include task rewards alongside distillation loss.
-  use_task_rewards: true
+  use_task_rewards: false
 
 
   # The coef of the distillation loss when use_task_rewards is true
   distillation_loss_coef: 1.0
 
   # Optional max clamp value for distillation loss. If null, no clamping is applied.
-  loss_max_clamp: null
+  loss_max_clamp: 10.0
 
   # Optional min clamp value for log probabilities for stability, e.g., log q - log p where p or q are very close to zero.
-  log_prob_min_clamp: null
+  log_prob_min_clamp: -10.0
 
-  # Whether to incorporate distillation loss as a reward.
-  use_policy_gradient: false
+  # Reverse-KL estimates are consumed as policy-gradient advantages.
+  use_policy_gradient: true
 
   # Name of the policy loss to use when use_policy_gradient is true.
   policy_loss_mode: "vanilla"

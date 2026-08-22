@@ -1307,6 +1307,9 @@ class RayPPOTrainer:
             if is_distillation_enabled(self.config.get("distillation"))
             else False
         )
+        distillation_combined_topk = bool(distillation_use_topk) and (
+            self.distillation_config.distillation_loss.loss_mode == "eopd"
+        )
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
@@ -1319,8 +1322,10 @@ class RayPPOTrainer:
             distillation_direct_chunked=bool(distillation_use_topk)
             and not bool(self.distillation_config.distillation_loss.use_task_rewards)
             and not bool(self.distillation_config.distillation_loss.use_policy_gradient),
+            distillation_combined_topk=distillation_combined_topk,
             distillation_chunk_size=int(self.distillation_config.student_chunk_size),
             distillation_log_prob_min_clamp=self.distillation_config.distillation_loss.log_prob_min_clamp,
+            eopd_entropy_threshold=self.distillation_config.distillation_loss.eopd_entropy_threshold,
             global_batch_size=ppo_mini_batch_size,
             mini_batch_size=ppo_mini_batch_size,
             epochs=ppo_epochs,

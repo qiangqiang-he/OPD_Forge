@@ -12,18 +12,30 @@ CONFIG = (
     / "p3_cal_opd"
     / "cal_opd_math33k_100steps.yaml"
 )
+LOSS_DEFAULTS = OmegaConf.load(
+    CONFIG.parents[2]
+    / "verl"
+    / "verl"
+    / "trainer"
+    / "config"
+    / "distillation"
+    / "distillation.yaml"
+).distillation_loss
 
 
 def test_cal_opd_config_contract():
     config = OmegaConf.load(CONFIG)
     loss = config.distillation.distillation_loss
+    effective_loss = OmegaConf.merge(LOSS_DEFAULTS, loss)
 
     assert config.algorithm.name == "cal_opd"
     assert config.run_name == "cal_opd_math33k_100steps"
     assert config.group_name == "cal_opd"
     assert loss.loss_mode == "cal_reverse_kl"
-    assert loss.topk is None
-    assert loss.use_policy_gradient is True
+    assert "topk" not in loss
+    assert "use_policy_gradient" not in loss
+    assert effective_loss.topk is None
+    assert effective_loss.use_policy_gradient is True
     assert loss.policy_loss_mode == "reinforce"
     assert config.trainer.total_training_steps == 100
     assert config.trainer.test_freq == 20

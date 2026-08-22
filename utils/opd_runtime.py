@@ -21,13 +21,16 @@ from verl.trainer import main_ppo_sync as verl_sync
 
 
 SUPPORTED_LOSS_MODES = {
-    "forward_kl_topk",
     "reverse_kl",
     "cal_reverse_kl",
+    "eopd",
+    "exopd_reverse_kl",
     "ps_reverse_kl",
-    "random_reverse_kl",
-    "topgap_reverse_kl",
+    "uni_opd",
+    "fire_opd",
 }
+
+TOKEN_SELECTION_METHODS = {"random", "topgap", "bottomgap"}
 
 
 def validation_namespace(data_source: str) -> str:
@@ -207,6 +210,26 @@ def configure_opd_data_parallel_batch(config) -> int:
     return adjusted_questions
 
 
+def validate_token_selection_config(loss) -> None:
+    """Validate the token-subset settings shared by GKD-OPD and PG-OPD."""
+
+    ratio = float(loss.selection_ratio)
+    if not 0.0 <= ratio <= 1.0:
+        raise ValueError(
+            f"OPD selection_ratio must lie in [0, 1], got {ratio}."
+        )
+
+    # Full-token training does not perform selection, so the configured method
+    # is deliberately irrelevant in this case.
+    if ratio < 1.0:
+        method = str(loss.selection_method)
+        if method not in TOKEN_SELECTION_METHODS:
+            expected = ", ".join(sorted(TOKEN_SELECTION_METHODS))
+            raise ValueError(
+                f"OPD selection_method must be one of {expected}; got {method!r}."
+            )
+
+
 def validate_opd_runtime_config(config) -> None:
     """Validate invariants shared by every retained OPD-family algorithm."""
 
@@ -221,23 +244,18 @@ def validate_opd_runtime_config(config) -> None:
     loss_mode = str(loss.loss_mode)
     if loss_mode not in SUPPORTED_LOSS_MODES:
         raise ValueError(f"Unsupported OPD-family loss_mode={loss_mode!r}.")
-    if loss_mode == "forward_kl_topk":
+    if loss_mode in {"eopd", "fire_opd"}:
         if loss.topk is None or int(loss.topk) <= 0:
-            raise ValueError("Forward-KL OPD requires a positive distillation topk.")
-        if bool(loss.use_policy_gradient):
             raise ValueError(
-                "forward_kl_topk must be directly backpropagated; set "
-                "use_policy_gradient=false."
+                f"{loss_mode} requires a positive distillation topk for "
+                "full-vocabulary Teacher entropy transfer."
             )
-    else:
-        if loss.topk is not None:
-            raise ValueError(
-                "Sampled reverse-KL variants require distillation topk=null."
-            )
-        if not bool(loss.use_policy_gradient):
-            raise ValueError(
-                "Sampled reverse-KL variants require use_policy_gradient=true."
-            )
+    elif loss.topk is not None:
+        raise ValueError("Reverse-KL OPD requires distillation topk=null.")
+    if not bool(loss.use_policy_gradient):
+        raise ValueError(
+            "Reverse-KL OPD signals must be consumed with use_policy_gradient=true."
+        )
     if bool(loss.use_task_rewards):
         raise ValueError("OPD is distillation-only; set use_task_rewards=false.")
 

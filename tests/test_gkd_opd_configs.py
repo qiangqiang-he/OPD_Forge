@@ -7,32 +7,12 @@ from omegaconf import OmegaConf
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs" / "p2_gkd_opd"
 EXPECTED_CONFIGS = {
-    "gkd_opd_math33k_100steps.yaml": ("gkd_opd", "reverse_kl", None),
-    "random_gkd_opd_math33k_ratio0p05_100steps.yaml": (
-        "random_gkd_opd",
-        "random_reverse_kl",
-        0.05,
-    ),
-    "random_gkd_opd_math33k_ratio0p10_100steps.yaml": (
-        "random_gkd_opd",
-        "random_reverse_kl",
-        0.10,
-    ),
-    "random_gkd_opd_math33k_ratio0p20_100steps.yaml": (
-        "random_gkd_opd",
-        "random_reverse_kl",
-        0.20,
-    ),
-    "random_gkd_opd_math33k_ratio0p40_100steps.yaml": (
-        "random_gkd_opd",
-        "random_reverse_kl",
-        0.40,
-    ),
-    "topgap_gkd_opd_math33k_ratio0p20_100steps.yaml": (
-        "topgap_gkd_opd",
-        "topgap_reverse_kl",
-        0.20,
-    ),
+    "gkd_opd_math33k_100steps.yaml": (1.0, "random"),
+    "random_gkd_opd_math33k_ratio0p05_100steps.yaml": (0.05, "random"),
+    "random_gkd_opd_math33k_ratio0p10_100steps.yaml": (0.10, "random"),
+    "random_gkd_opd_math33k_ratio0p20_100steps.yaml": (0.20, "random"),
+    "random_gkd_opd_math33k_ratio0p40_100steps.yaml": (0.40, "random"),
+    "topgap_gkd_opd_math33k_ratio0p20_100steps.yaml": (0.20, "topgap"),
 }
 
 
@@ -42,13 +22,16 @@ def test_p2_gkd_opd_config_contracts():
 
     run_names = set()
     for path in paths:
-        algorithm_name, loss_mode, ratio = EXPECTED_CONFIGS[path.name]
+        ratio, method = EXPECTED_CONFIGS[path.name]
         config = OmegaConf.load(path)
         loss = config.distillation.distillation_loss
 
-        assert config.algorithm.name == algorithm_name
-        assert loss.loss_mode == loss_mode
-        assert loss.policy_loss_mode == "vanilla"
+        assert config.algorithm.name == "gkd_opd"
+        assert loss.selection_ratio == ratio
+        assert loss.selection_method == method
+        assert "loss_mode" not in loss
+        assert "topk" not in loss
+        assert "policy_loss_mode" not in loss
         assert config.group_name == "GKD_OPD"
         assert config.trainer.total_training_steps == 100
         assert list(config.data.train_files) == ["./data/nvidia_math_33k.json"]
@@ -61,8 +44,6 @@ def test_p2_gkd_opd_config_contracts():
         assert config.run_name not in run_names
         run_names.add(config.run_name)
 
-        if algorithm_name == "random_gkd_opd":
-            assert loss.random_token_ratio == ratio
-        elif algorithm_name == "topgap_gkd_opd":
-            assert loss.topgap_token_ratio == ratio
-            assert loss.topgap_selection == "top"
+        assert "random_token_ratio" not in loss
+        assert "topgap_token_ratio" not in loss
+        assert "topgap_selection" not in loss

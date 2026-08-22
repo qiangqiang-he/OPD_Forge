@@ -1,0 +1,86 @@
+# Uni-OPD: Qwen3-4B teacher and Qwen3-1.7B student, both no-thinking.
+
+defaults:
+  - /base
+  - _self_
+
+run_name: uni_opd_qwen3_4b_to_1p7b_no_thinking_100steps
+group_name: UniOPD
+run_name_prefix: uni_opd_qwen3_4b_to_1p7b_no_thinking_100steps
+
+student_prompt: qwen3_no_thinking_prompt
+teacher_prompt: qwen3_no_thinking_prompt
+
+data:
+  train_files:
+    - ./data/DAPO-17k.json
+  val_files:
+    - ./data/AMC-2023.json
+    - ./data/AIME-2024.json
+    - ./data/AIME-2025.json
+  train_batch_size: 16
+  max_response_length: 16384
+
+actor_rollout_ref:
+  model:
+    path: ../FrugalRL/models/Qwen3-1.7B
+  actor:
+    ppo_mini_batch_size: 16
+    # 2048 prompt + 4096 training response + one shifted-logit token.
+    ppo_max_token_len_per_gpu: 6145
+    loss_agg_mode: token-mean
+    optim:
+      lr: 1.0e-6
+  rollout:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    n: 16
+    # 2048 prompt + 16384 validation response.
+    max_model_len: 18432
+    max_num_batched_tokens: 18432
+    log_prob_max_token_len_per_gpu: 6145
+    val_kwargs:
+      temperature: 0.6
+      top_p: 0.95
+      top_k: -1
+      n: 16
+  ref:
+    log_prob_max_token_len_per_gpu: 6145
+
+algorithm:
+  name: uni_opd
+  uni_opd:
+    target_correct_ratio: 0.5
+    margin_scope: group
+    trajectory_reduce: mean
+    margin_direction: spread
+    margin_delta: 0.4
+
+rlvr_generation:
+  train_max_new_tokens: 4096
+  val_max_new_tokens: 16384
+
+distillation:
+  teacher_models:
+    teacher_model:
+      model_path: ../FrugalRL/models/Qwen3-4B
+      inference:
+        response_length: 4096
+        # 2048 prompt + 4096 response + one teacher prediction token.
+        max_model_len: 6145
+        engine_kwargs:
+          vllm:
+            max_logprobs: 16
+  distillation_loss:
+    loss_mode: uni_opd
+    loss_max_clamp: null
+    policy_loss_mode: reinforce
+
+trainer:
+  experiment_name: ${run_name}
+  total_training_steps: 100
+  default_local_dir: ./outputs/${run_name}
+  val_before_train: true
+  test_freq: 20
+  save_freq: 20

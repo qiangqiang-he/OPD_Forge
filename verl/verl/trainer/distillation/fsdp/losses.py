@@ -16,6 +16,7 @@
 import torch
 import torch.nn.functional as F
 
+from verl.trainer.distillation.eopd import compute_entropy_gated_forward_kl
 from verl.utils.ulysses import (
     get_ulysses_sequence_parallel_world_size,
     slice_input_tensor,
@@ -87,6 +88,79 @@ def compute_forward_kl_topk(
 
     return {
         "distillation_losses": distillation_losses,
+        "student_mass": student_mass,
+        "teacher_mass": teacher_mass,
+        "overlap_count": overlap_count,
+        "overlap_token_advantage": overlap_token_advantage,
+    }
+
+
+def compute_eopd_forward_kl_topk(
+    student_logits: torch.Tensor,
+    teacher_topk_log_probs: torch.Tensor,
+    teacher_topk_ids: torch.Tensor,
+    teacher_entropy: torch.Tensor,
+    config: DistillationConfig,
+    data_format: str,
+) -> dict[str, torch.Tensor]:
+    """Compute EOPD's entropy-gated Top-k FKL from full-vocabulary logits."""
+
+    del data_format
+    assert teacher_topk_log_probs.is_nested and teacher_topk_ids.is_nested
+    assert teacher_entropy.is_nested
+    teacher_topk_log_probs = teacher_topk_log_probs.values().unsqueeze(0)
+    teacher_topk_ids = teacher_topk_ids.values().unsqueeze(0)
+    teacher_entropy = teacher_entropy.values().reshape(1, -1)
+
+    if get_ulysses_sequence_parallel_world_size() > 1:
+        teacher_topk_log_probs = slice_input_tensor(teacher_topk_log_probs, dim=1)
+        teacher_topk_ids = slice_input_tensor(teacher_topk_ids, dim=1)
+        teacher_entropy = slice_input_tensor(teacher_entropy, dim=1)
+    if not (
+        teacher_topk_log_probs.shape[:2]
+        == teacher_topk_ids.shape[:2]
+        == teacher_entropy.shape
+        == student_logits.shape[:2]
+    ):
+        raise ValueError("EOPD Student logits and Teacher tensors are not token-aligned.")
+
+    student_log_probs = F.log_softmax(student_logits, dim=-1)
+    student_topk_ids = torch.topk(
+        student_log_probs, k=teacher_topk_ids.shape[-1], dim=-1
+    ).indices
+    student_teacher_log_probs = torch.gather(
+        student_log_probs, dim=-1, index=teacher_topk_ids
+    )
+    student_mass = student_teacher_log_probs.exp().sum(dim=-1)
+    teacher_mass = teacher_topk_log_probs.float().exp().sum(dim=-1)
+    losses = compute_entropy_gated_forward_kl(
+        student_teacher_log_probs,
+        teacher_topk_log_probs,
+        teacher_entropy,
+        entropy_threshold=config.distillation_loss.eopd_entropy_threshold,
+    )
+
+    overlap_mask = (
+        teacher_topk_ids.unsqueeze(-1) == student_topk_ids.unsqueeze(-2)
+    ).any(dim=-1)
+    overlap_count = overlap_mask.sum(dim=-1)
+    normalized_teacher_log_probs = teacher_topk_log_probs.float() - torch.logsumexp(
+        teacher_topk_log_probs.float(), dim=-1, keepdim=True
+    )
+    token_kl = normalized_teacher_log_probs.exp() * (
+        normalized_teacher_log_probs - student_teacher_log_probs.float()
+    )
+    overlap_token_advantage = (
+        -token_kl * overlap_mask
+    ).sum(dim=-1) / overlap_count.clamp_min(1)
+    overlap_token_advantage = torch.where(
+        overlap_count > 0,
+        overlap_token_advantage,
+        torch.zeros_like(overlap_token_advantage),
+    )
+
+    return {
+        "distillation_losses": losses,
         "student_mass": student_mass,
         "teacher_mass": teacher_mass,
         "overlap_count": overlap_count,

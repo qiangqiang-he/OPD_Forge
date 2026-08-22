@@ -1,0 +1,80 @@
+# EOPD: Qwen3-4B Teacher and Qwen3-1.7B Student, both thinking.
+
+defaults:
+  - /base
+  - _self_
+
+run_name: eopd_qwen3_4b_to_1p7b_thinking_100steps
+group_name: EOPD
+run_name_prefix: eopd_qwen3_4b_to_1p7b_thinking_100steps
+
+student_prompt: qwen3_thinking_prompt
+teacher_prompt: qwen3_thinking_prompt
+
+data:
+  train_files:
+    - ./data/DAPO-17k.json
+  val_files:
+    - ./data/AMC-2023.json
+    - ./data/AIME-2024.json
+    - ./data/AIME-2025.json
+  max_response_length: 32768
+
+actor_rollout_ref:
+  model:
+    path: ../FrugalRL/models/Qwen3-1.7B
+  actor:
+    ppo_max_token_len_per_gpu: 10241
+    optim:
+      lr: 1.0e-6
+  rollout:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    n: 1
+    max_model_len: 34816
+    max_num_batched_tokens: 34816
+    log_prob_max_token_len_per_gpu: 10241
+    val_kwargs:
+      temperature: 0.6
+      top_p: 0.95
+      top_k: -1
+      n: 16
+  ref:
+    log_prob_max_token_len_per_gpu: 10241
+
+algorithm:
+  name: eopd
+
+rlvr_generation:
+  train_max_new_tokens: 8192
+  val_max_new_tokens: 32768
+
+distillation:
+  teacher_chunk_size: 128
+  teacher_models:
+    teacher_model:
+      model_path: ../FrugalRL/models/Qwen3-4B
+      inference:
+        response_length: 8192
+        max_model_len: 10241
+        engine_kwargs:
+          vllm:
+            max_logprobs: 17
+            eopd_entropy_topk: 16
+  distillation_loss:
+    loss_mode: eopd
+    topk: 16
+    eopd_entropy_threshold: 0.8
+    eopd_alpha: 1.0
+    loss_max_clamp: 20.0
+    log_prob_min_clamp: null
+    policy_loss_mode: reinforce
+
+trainer:
+  experiment_name: ${run_name}
+  total_training_steps: 100
+  default_local_dir: ./outputs/${run_name}
+  val_before_train: true
+  test_freq: 20
+  save_freq: 20

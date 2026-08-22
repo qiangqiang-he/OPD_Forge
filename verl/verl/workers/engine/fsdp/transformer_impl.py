@@ -382,10 +382,14 @@ class FSDPEngine(BaseEngine):
             # - critic: None
             # - ref: CPUOffload(offload_params=True)
 
-            # We force reference policy to use CPUOffload to save memory.
+            # Reference policies use CPUOffload by default. Memory-rich colocated
+            # setups (for example ExOPD) may explicitly keep the frozen model on GPU.
             # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
             cpu_offload = None
-            if self.engine_config.forward_only:
+            if (
+                self.engine_config.forward_only
+                and not self.engine_config.forward_only_keep_on_device
+            ):
                 cpu_offload = CPUOffload(offload_params=True)
                 self._is_offload_param = False
                 self._is_offload_optimizer = False
@@ -412,7 +416,10 @@ class FSDPEngine(BaseEngine):
                 param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True
             )
             offload_policy = None
-            if self.engine_config.offload_policy or self.engine_config.forward_only:
+            if self.engine_config.offload_policy or (
+                self.engine_config.forward_only
+                and not self.engine_config.forward_only_keep_on_device
+            ):
                 self._is_offload_param = False
                 self._is_offload_optimizer = False
                 offload_policy = CPUOffloadPolicy(pin_memory=True)
@@ -1054,7 +1061,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
             direct_chunked = tu.get_non_tensor_data(
                 data=micro_batch, key="distillation_direct_chunked", default=False
             )
-            if direct_chunked:
+            combined_topk = tu.get_non_tensor_data(
+                data=micro_batch, key="distillation_combined_topk", default=False
+            )
+            if direct_chunked or combined_topk:
                 if not use_remove_padding:
                     raise NotImplementedError("chunked direct OPD currently requires use_remove_padding=true")
                 teacher_ids = micro_batch["teacher_ids"].values().unsqueeze(0)
@@ -1072,6 +1082,22 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         data=micro_batch, key="distillation_log_prob_min_clamp", default=None
                     ),
                 )
+                if combined_topk:
+                    teacher_entropy = micro_batch["teacher_entropy"].values().reshape(1, -1)
+                    if self.use_ulysses_sp:
+                        teacher_entropy = slice_input_tensor(
+                            teacher_entropy, dim=1, padding=True
+                        )
+                    extra_args.update(
+                        teacher_entropy=teacher_entropy,
+                        eopd_entropy_threshold=float(
+                            tu.get_non_tensor_data(
+                                data=micro_batch,
+                                key="eopd_entropy_threshold",
+                                default=0.8,
+                            )
+                        ),
+                    )
             if use_remove_padding:
                 # We have already computed `input_ids_rmpad_rolled` from the *full*
                 # global sequence and (when SP>1) SP-sliced it. Pass it into the model
@@ -1118,7 +1144,12 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # temperature is singleton
                 if not distillation_direct_chunked:
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
-                    entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
+                    if calculate_entropy:
+                        if output.entropy is None:
+                            raise NotImplementedError(
+                                "EOPD combined chunking does not compute Student entropy."
+                            )
+                        entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
 
                 # When the fused kernel also computed top-K distillation
                 # (veomni's chunk_topk_distill path), extract the per-token

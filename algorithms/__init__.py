@@ -25,34 +25,26 @@ ALGORITHM_REGISTRY: dict[str, AlgorithmRegistration] = {
     "pg_opd": AlgorithmRegistration(
         "algorithms.pg_opd", "PGOPDTrainer", "validate_pg_opd_config"
     ),
-    "random_pg_opd": AlgorithmRegistration(
-        "algorithms.random_pg_opd",
-        "RandomPGOPDTrainer",
-        "validate_random_pg_opd_config",
-    ),
-    "topgap_pg_opd": AlgorithmRegistration(
-        "algorithms.topgap_pg_opd",
-        "TopGapPGOPDTrainer",
-        "validate_topgap_pg_opd_config",
-    ),
     "gkd_opd": AlgorithmRegistration(
         "algorithms.gkd_opd", "GKDOPDTrainer", "validate_gkd_opd_config"
-    ),
-    "random_gkd_opd": AlgorithmRegistration(
-        "algorithms.random_gkd_opd",
-        "RandomGKDOPDTrainer",
-        "validate_random_gkd_opd_config",
-    ),
-    "topgap_gkd_opd": AlgorithmRegistration(
-        "algorithms.topgap_gkd_opd",
-        "TopGapGKDOPDTrainer",
-        "validate_topgap_gkd_opd_config",
     ),
     "ps_opd": AlgorithmRegistration(
         "algorithms.ps_opd", "PSOPDTrainer", "validate_ps_opd_config"
     ),
     "cal_opd": AlgorithmRegistration(
         "algorithms.cal_opd", "CalOPDTrainer", "validate_cal_opd_config"
+    ),
+    "exopd": AlgorithmRegistration(
+        "algorithms.exopd", "ExOPDTrainer", "validate_exopd_config"
+    ),
+    "eopd": AlgorithmRegistration(
+        "algorithms.eopd", "EOPDTrainer", "validate_eopd_config"
+    ),
+    "uni_opd": AlgorithmRegistration(
+        "algorithms.uni_opd", "UniOPDTrainer", "validate_uni_opd_config"
+    ),
+    "fire_opd": AlgorithmRegistration(
+        "algorithms.fire_opd", "FiReOPDTrainer", "validate_fire_opd_config"
     ),
 }
 

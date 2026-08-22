@@ -7,23 +7,23 @@ from pathlib import Path
 ALGORITHM_FILES = (
     "gkd_opd.py",
     "pg_opd.py",
-    "random_gkd_opd.py",
-    "random_pg_opd.py",
-    "topgap_gkd_opd.py",
-    "topgap_pg_opd.py",
     "ps_opd.py",
     "cal_opd.py",
+    "exopd.py",
+    "eopd.py",
+    "uni_opd.py",
+    "fire_opd.py",
 )
 
 CANONICAL_ALGORITHM_NAMES = {
     "pg_opd",
-    "random_pg_opd",
-    "topgap_pg_opd",
     "gkd_opd",
-    "random_gkd_opd",
-    "topgap_gkd_opd",
     "ps_opd",
     "cal_opd",
+    "exopd",
+    "eopd",
+    "uni_opd",
+    "fire_opd",
 }
 
 
@@ -52,3 +52,15 @@ def test_registry_contains_only_explicit_canonical_names():
 
     assert set(ALGORITHM_REGISTRY) == CANONICAL_ALGORITHM_NAMES
     assert "opd" not in ALGORITHM_REGISTRY
+
+
+def test_removed_algorithm_modules_stay_removed():
+    algorithm_dir = Path(__file__).resolve().parents[1] / "algorithms"
+    removed = {
+        "random_gkd_opd.py",
+        "random_pg_opd.py",
+        "topgap_gkd_opd.py",
+        "topgap_pg_opd.py",
+    }
+
+    assert not {path.name for path in algorithm_dir.iterdir()} & removed

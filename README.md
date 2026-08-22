@@ -2,10 +2,15 @@
 
 OPD_Forge 基于 VERL 实现策略梯度 OPD 与 GKD-OPD。正式实验配置位于：
 
-- `configs/p1_pg_opd/`：PG-OPD、Random PG-OPD（5%/10%/20%/40%）和 TopGap PG-OPD（20%）
-- `configs/p2_gkd_opd/`：GKD-OPD、Random GKD-OPD（5%/10%/20%/40%）和 TopGap GKD-OPD（20%）
+- `configs/p1_pg_opd/`：统一 PG-OPD，以及 random（5%/10%/20%/40%）和 topgap（20%）选择配置
+- `configs/p2_gkd_opd/`：统一 GKD-OPD，以及 random（5%/10%/20%/40%）和 topgap（20%）选择配置
 - `configs/p3_cal_opd/`：Cal-OPD（正、负反馈校准 Teacher 自身偏移）
 - `configs/temp/`：对应的 5-step 测试配置
+
+PG-OPD 与 GKD-OPD 都只使用 sampled-token reverse KL。token 子集由
+`distillation.distillation_loss.selection_ratio` 和 `selection_method` 控制；
+`selection_method` 可取 `random`、`topgap` 或 `bottomgap`。当比例为 `1` 时
+训练使用全部有效 token，选择方式不会参与计算。
 
 ## 安装环境
 
@@ -62,3 +67,12 @@ RUN_NAME=my_run GROUP_NAME=my_group \
 ```
 
 正式运行前请确认配置中的模型、训练集和评估集路径在当前机器上可访问。同一组 GPU 上不要同时启动多个训练。
+
+## 八卡 smoke
+
+下面的脚本依次运行 thinking GKD-OPD 和 no-thinking PG-OPD，各训练 2 steps，
+并在最后一步使用 AMC23 的一个最小样本计算 Avg@4：
+
+```bash
+bash tests/run_unified_opd_smoke.sh
+```

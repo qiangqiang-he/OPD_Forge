@@ -35,11 +35,18 @@ def _get_teacher_sampling_params(
     if teacher_model_config.inference.temperature != 1.0:
         raise NotImplementedError("vLLM does not support temperature for prompt_logprobs.")
 
-    num_logprobs = (
-        distillation_loss_config.topk
-        if distillation_loss_config.loss_settings.use_topk
-        else distillation_loss_config.diagnostic_topk
-    )
+    if getattr(
+        distillation_loss_config.loss_settings,
+        "use_full_vocab_teacher_entropy",
+        False,
+    ):
+        num_logprobs = int(distillation_loss_config.topk) + 1
+    else:
+        num_logprobs = (
+            distillation_loss_config.topk
+            if distillation_loss_config.loss_settings.use_topk
+            else distillation_loss_config.diagnostic_topk
+        )
     return {
         "max_tokens": 1,
         "temperature": teacher_model_config.inference.temperature,
@@ -169,12 +176,29 @@ class AsyncTeacherLLMServerManager:
         multi_modal_data: Optional[dict[str, Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         routing_key: Optional[str] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float]]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        Optional[torch.Tensor],
+        dict[str, float],
+    ]:
         """Compute teacher log probabilities for a single unpadded sequence."""
         multi_modal_data = multi_modal_data or {}
         teacher_key = self._resolve_teacher_key(routing_key)
         teacher_model_config = self.teacher_model_configs[teacher_key]
         client = self.teacher_client[teacher_key]
+        extra_generate_kwargs = {}
+        if getattr(
+            self.distillation_loss_config.loss_settings,
+            "use_full_vocab_teacher_entropy",
+            False,
+        ):
+            extra_generate_kwargs["prompt_logprobs_topk"] = int(
+                self.distillation_loss_config.topk
+            )
         teacher_output = await client.generate(
             request_id=uuid4().hex,
             prompt_ids=sequence_ids,
@@ -183,17 +207,31 @@ class AsyncTeacherLLMServerManager:
             video_data=multi_modal_data.get("videos"),
             audio_data=multi_modal_data.get("audios"),
             mm_processor_kwargs=mm_processor_kwargs,
+            **extra_generate_kwargs,
         )
         # Shapes: [S, 1 or K], where S is the complete teacher prompt-plus-response
         # sequence length. Each row predicts the following token, and the last row is dummy.
         diagnostic_ids = torch.tensor(teacher_output.extra_fields["prompt_ids"], dtype=torch.int32)
         diagnostic_logprobs = torch.tensor(teacher_output.extra_fields["prompt_logprobs"])
+        sampled_ids = torch.tensor(
+            teacher_output.extra_fields["prompt_sampled_ids"], dtype=torch.int32
+        )
+        sampled_logprobs = torch.tensor(
+            teacher_output.extra_fields["prompt_sampled_logprobs"]
+        )
+        teacher_entropy = None
+        if getattr(
+            self.distillation_loss_config.loss_settings,
+            "use_full_vocab_teacher_entropy",
+            False,
+        ):
+            teacher_entropy = torch.tensor(teacher_output.extra_fields["prompt_entropies"])
         if self.distillation_loss_config.loss_settings.use_topk:
             teacher_ids = diagnostic_ids
             teacher_logprobs = diagnostic_logprobs
         else:
-            teacher_ids = torch.tensor(teacher_output.extra_fields["prompt_sampled_ids"], dtype=torch.int32)
-            teacher_logprobs = torch.tensor(teacher_output.extra_fields["prompt_sampled_logprobs"])
+            teacher_ids = sampled_ids
+            teacher_logprobs = sampled_logprobs
         # Teacher and student prompts may differ when their thinking modes are
         # configured independently.  Only response-token distributions enter
         # the OPD loss, so align the teacher's final response positions to the
@@ -212,22 +250,46 @@ class AsyncTeacherLLMServerManager:
             student_prompt_length=student_prompt_length,
             response_length=response_length,
         )
-        if not self.distillation_loss_config.loss_settings.use_topk:
-            aligned_response_ids = _slice_response_prediction_outputs(teacher_ids, response_length).reshape(-1)
-            expected_response_ids = torch.as_tensor(
-                sequence_ids[-response_length:],
-                dtype=aligned_response_ids.dtype,
-                device=aligned_response_ids.device,
+        sampled_ids, sampled_logprobs = _align_teacher_response_outputs(
+            sampled_ids,
+            sampled_logprobs,
+            teacher_sequence_length=len(sequence_ids),
+            student_prompt_length=student_prompt_length,
+            response_length=response_length,
+        )
+        if teacher_entropy is not None:
+            _, teacher_entropy = _align_teacher_response_outputs(
+                torch.zeros_like(teacher_entropy, dtype=torch.int32),
+                teacher_entropy,
+                teacher_sequence_length=len(sequence_ids),
+                student_prompt_length=student_prompt_length,
+                response_length=response_length,
             )
-            if not torch.equal(aligned_response_ids, expected_response_ids):
-                raise RuntimeError(
-                    "OPD teacher sampled-token alignment invariant failed: teacher ids at "
-                    "the loss positions do not equal the student response ids."
-                )
+        aligned_response_ids = _slice_response_prediction_outputs(
+            sampled_ids, response_length
+        ).reshape(-1)
+        expected_response_ids = torch.as_tensor(
+            sequence_ids[-response_length:],
+            dtype=aligned_response_ids.dtype,
+            device=aligned_response_ids.device,
+        )
+        if not torch.equal(aligned_response_ids, expected_response_ids):
+            raise RuntimeError(
+                "OPD teacher sampled-token alignment invariant failed: teacher ids at "
+                "the loss positions do not equal the student response ids."
+            )
         timing = {
             "teacher_engine_s": float(teacher_output.extra_fields.get("engine_generate_s", 0.0)),
             "teacher_logprob_extract_s": float(
                 teacher_output.extra_fields.get("prompt_logprobs_extract_s", 0.0)
             ),
         }
-        return teacher_ids, teacher_logprobs, diagnostic_ids, diagnostic_logprobs, timing
+        return (
+            teacher_ids,
+            teacher_logprobs,
+            diagnostic_ids,
+            diagnostic_logprobs,
+            sampled_logprobs,
+            teacher_entropy,
+            timing,
+        )

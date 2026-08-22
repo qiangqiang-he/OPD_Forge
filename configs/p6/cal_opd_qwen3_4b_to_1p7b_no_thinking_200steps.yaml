@@ -67,13 +67,7 @@ distillation:
   distillation_loss:
     loss_mode: cal_reverse_kl
     cal_lambda: 5.0
-    topk: null
-    diagnostic_topk: 16
-    use_task_rewards: false
-    distillation_loss_coef: 1.0
     loss_max_clamp: 20.0
-    log_prob_min_clamp: -10.0
-    use_policy_gradient: true
     policy_loss_mode: reinforce
 
 trainer:

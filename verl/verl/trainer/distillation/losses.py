@@ -62,6 +62,7 @@ class DistillationLossSettings(BaseConfig):
     names: str | list[str] = field(default_factory=list)
     use_topk: bool = False
     use_estimator: bool = False
+    use_full_vocab_teacher_entropy: bool = False
 
     _mutable_fields = {"names"}
 
@@ -144,7 +145,10 @@ def compute_topk_loss(
         case "fsdp" | "veomni":
             import verl.trainer.distillation.fsdp.losses as fsdp_losses
 
-            distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
+            if distillation_config.distillation_loss.loss_mode == "eopd":
+                distillation_loss_fn = fsdp_losses.compute_eopd_forward_kl_topk
+            else:
+                distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
         case "megatron":
             import verl.trainer.distillation.megatron.losses as megatron_losses
 
@@ -152,13 +156,16 @@ def compute_topk_loss(
         case _:
             raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
 
-    outputs = distillation_loss_fn(
-        student_logits=student_logits,
-        teacher_topk_log_probs=data["teacher_logprobs"],
-        teacher_topk_ids=data["teacher_ids"],
-        config=distillation_config,
-        data_format=data_format,
-    )
+    kwargs = {
+        "student_logits": student_logits,
+        "teacher_topk_log_probs": data["teacher_logprobs"],
+        "teacher_topk_ids": data["teacher_ids"],
+        "config": distillation_config,
+        "data_format": data_format,
+    }
+    if distillation_config.distillation_loss.loss_mode == "eopd":
+        kwargs["teacher_entropy"] = data["teacher_entropy"]
+    outputs = distillation_loss_fn(**kwargs)
 
     expected_shape = student_logits.shape[:2]
     for k, v in outputs.items():
@@ -256,6 +263,11 @@ def distillation_loss(
     )
     response_mask = data["response_mask"]
     loss_agg_mode = config.loss_agg_mode
+    eopd_forward_kl_losses = None
+    if loss_config.loss_mode == "eopd":
+        eopd_forward_kl_losses = no_padding_2_padding(
+            model_output["distillation_losses"], data
+        )
 
     distillation_metrics.update(
         compute_distillation_loss_range(distillation_losses=distillation_losses, response_mask=response_mask)
@@ -263,6 +275,28 @@ def distillation_loss(
     if loss_config.loss_max_clamp is not None:
         # clamping min is for k1 loss which can be negative
         distillation_losses = distillation_losses.clamp(min=-loss_config.loss_max_clamp, max=loss_config.loss_max_clamp)
+
+    if loss_config.loss_mode == "fire_opd":
+        loss_normalization = tu.get_non_tensor_data(
+            data=data,
+            key="fire_opd_loss_normalization",
+            default=None,
+        )
+        if loss_normalization is None:
+            raise RuntimeError(
+                "FiRe-OPD actor input is missing fire_opd_loss_normalization."
+            )
+        loss_normalization = float(loss_normalization)
+        if not math.isfinite(loss_normalization) or loss_normalization < 1.0:
+            raise ValueError(
+                "FiRe-OPD loss normalization must be finite and at least one; "
+                f"got {loss_normalization}."
+            )
+        # Filtered trajectories stay in the physical actor batch with zero
+        # advantage so a size-one micro-batch is never all-masked.  Correct
+        # the shared reducer's unchanged global denominator to make this
+        # exactly equivalent to deleting those trajectories before the loss.
+        distillation_losses = distillation_losses * loss_normalization
 
     if loss_config.use_policy_gradient:
         # Use negative distillation loss as reward, as done by https://thinkingmachines.ai/blog/on-policy-distillation/.
@@ -296,6 +330,21 @@ def distillation_loss(
             loss_mask=response_mask,
             loss_agg_mode=loss_agg_mode,
             **config.global_batch_info,
+        )
+
+    if eopd_forward_kl_losses is not None:
+        forward_kl_loss = agg_loss(
+            loss_mat=eopd_forward_kl_losses,
+            loss_mask=response_mask,
+            loss_agg_mode=loss_agg_mode,
+            **config.global_batch_info,
+        )
+        distillation_loss = distillation_loss + loss_config.eopd_alpha * forward_kl_loss
+        distillation_metrics["distillation/eopd_forward_kl_loss"] = Metric(
+            AggregationType.SUM, forward_kl_loss
+        )
+        distillation_metrics["distillation/eopd_scaled_forward_kl_loss"] = Metric(
+            AggregationType.SUM, loss_config.eopd_alpha * forward_kl_loss
         )
 
     return distillation_loss, distillation_metrics
@@ -404,6 +453,105 @@ def compute_distillation_loss_reverse_kl_estimator(
     return distillation_losses, metrics
 
 
+@register_distillation_loss(
+    DistillationLossSettings(names=["uni_opd"], use_estimator=True)
+)  # type: ignore[arg-type]
+def compute_uni_opd_trajectory_loss(
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
+    model_output: dict,
+    data: TensorDict,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Return ``-tilde_G`` for Uni-OPD's detached REINFORCE path.
+
+    The complete-batch trajectory reduction, correctness balancing, group
+    margin shift, and token broadcast are performed by ``UniOPDTrainer`` before
+    the actor batch is split across workers.  Recomputing any of them here
+    would incorrectly use only the current micro-batch.
+    """
+
+    del config, distillation_config, model_output
+    if "uni_opd_advantages" not in data:
+        raise RuntimeError(
+            "Uni-OPD actor input is missing controller-computed "
+            "uni_opd_advantages."
+        )
+
+    advantage = data["uni_opd_advantages"]
+    if advantage.is_nested:
+        advantage = advantage.to_padded_tensor(0.0)
+    advantage = advantage.detach()
+    if data["response_mask"].is_nested:
+        response_mask = data["response_mask"].bool().to_padded_tensor(False)
+    else:
+        response_mask = data["response_mask"].bool()
+    if advantage.shape != response_mask.shape:
+        raise ValueError(
+            "Uni-OPD broadcast advantage and response mask must have identical "
+            f"shapes; got {advantage.shape} and {response_mask.shape}."
+        )
+    loss_normalization = tu.get_non_tensor_data(
+        data=data,
+        key="uni_opd_loss_normalization",
+        default=None,
+    )
+    if loss_normalization is None:
+        raise RuntimeError(
+            "Uni-OPD actor input is missing uni_opd_loss_normalization."
+        )
+    loss_normalization = float(loss_normalization)
+    if not math.isfinite(loss_normalization) or loss_normalization < 1.0:
+        raise ValueError(
+            "Uni-OPD loss normalization must be finite and at least one; "
+            f"got {loss_normalization}."
+        )
+    # distillation_loss() negates and detaches this tensor before REINFORCE,
+    # recovering the controller-computed calibrated return.  The global scale
+    # changes only the denominator convention: averaging over all 256 physical
+    # rows becomes averaging over the correctness-balanced subset.
+    return -(advantage * loss_normalization), {}
+
+
+@register_distillation_loss(
+    DistillationLossSettings(
+        names=["fire_opd"],
+        use_estimator=True,
+        use_full_vocab_teacher_entropy=True,
+    )
+)  # type: ignore[arg-type]
+def compute_fire_opd_trajectory_loss(
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
+    model_output: dict,
+    data: TensorDict,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Return the controller-computed ``-A_FiRe`` to the shared PG path."""
+
+    del config, distillation_config, model_output
+    if "fire_opd_advantages" not in data:
+        raise RuntimeError(
+            "FiRe-OPD actor input is missing controller-computed "
+            "fire_opd_advantages."
+        )
+    advantage = data["fire_opd_advantages"]
+    if advantage.is_nested:
+        advantage = advantage.to_padded_tensor(0.0)
+    advantage = advantage.detach()
+    response_mask = data["response_mask"]
+    if response_mask.is_nested:
+        response_mask = response_mask.bool().to_padded_tensor(False)
+    else:
+        response_mask = response_mask.bool()
+    if advantage.shape != response_mask.shape:
+        raise ValueError(
+            "FiRe-OPD advantage and response mask must have identical shapes; "
+            f"got {advantage.shape} and {response_mask.shape}."
+        )
+    # distillation_loss() negates and detaches this tensor before invoking the
+    # configured OPD policy-loss implementation, recovering A_FiRe.
+    return -advantage, {}
+
+
 def compute_opd_outcome_statistics(
     advantage: torch.Tensor,
     response_mask: torch.Tensor,
@@ -460,6 +608,54 @@ def compute_opd_outcome_statistics(
     }
 
 
+def select_opd_reverse_kl_tokens(
+    reverse_kl: torch.Tensor,
+    response_mask: torch.Tensor,
+    *,
+    selection_ratio: float,
+    selection_method: str,
+) -> torch.Tensor:
+    """Return the valid tokens selected for a reverse-KL OPD update."""
+
+    ratio = float(selection_ratio)
+    if not 0.0 <= ratio <= 1.0:
+        raise ValueError(f"selection_ratio must lie in [0, 1], got {ratio}.")
+
+    valid = response_mask.bool()
+    if ratio == 1.0:
+        # Do not inspect the method: full-token training has no selection step.
+        return valid.clone()
+
+    method = str(selection_method)
+    if method not in {"random", "topgap", "bottomgap"}:
+        raise ValueError(
+            "selection_method must be one of random, topgap, bottomgap; "
+            f"got {method!r}."
+        )
+    if ratio == 0.0:
+        return torch.zeros_like(valid)
+    if method == "random":
+        return (torch.rand_like(reverse_kl, dtype=torch.float32) < ratio) & valid
+
+    selected = torch.zeros_like(valid)
+    largest = method == "topgap"
+    gap = reverse_kl.abs()
+    for row in range(valid.shape[0]):
+        valid_indices = valid[row].nonzero(as_tuple=False).squeeze(-1)
+        valid_count = int(valid_indices.numel())
+        if valid_count == 0:
+            continue
+        selected_count = min(valid_count, max(1, math.ceil(valid_count * ratio)))
+        ranked_indices = torch.topk(
+            gap[row, valid_indices],
+            k=selected_count,
+            largest=largest,
+            sorted=False,
+        ).indices
+        selected[row, valid_indices[ranked_indices]] = True
+    return selected
+
+
 @register_distillation_loss(DistillationLossSettings(names=["reverse_kl"], use_estimator=True))  # type: ignore[arg-type]
 def compute_sampled_token_reverse_kl(
     config: ActorConfig,
@@ -470,9 +666,10 @@ def compute_sampled_token_reverse_kl(
     """Estimate KL(student || teacher) on tokens sampled by the student.
 
     The returned per-token value is ``log p_student(a) - log p_teacher(a)``.
-    Standard OPD consumes it as a detached policy-gradient advantage; directly
-    differentiating this sampled value would not produce the reverse-KL
-    gradient.  No teacher or student top-k distribution is materialized.
+    GKD-OPD and PG-OPD consume it as a detached policy-gradient advantage.
+    ``selection_ratio`` and ``selection_method`` optionally retain a token
+    subset without changing the sign of the selected reverse-KL signals. No
+    teacher or student top-k distribution is materialized.
     """
     student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
     teacher_log_probs = no_padding_2_padding(data["teacher_logprobs"], data).squeeze(-1)
@@ -482,9 +679,31 @@ def compute_sampled_token_reverse_kl(
         response_mask_bool = data["response_mask"].bool()
     assert teacher_log_probs.shape == student_log_probs.shape == response_mask_bool.shape
 
+    loss_config = distillation_config.distillation_loss
     sampled_reverse_kl = student_log_probs - teacher_log_probs
+    selected_mask = select_opd_reverse_kl_tokens(
+        sampled_reverse_kl,
+        response_mask_bool,
+        selection_ratio=float(loss_config.selection_ratio),
+        selection_method=str(loss_config.selection_method),
+    )
+    selected_reverse_kl = sampled_reverse_kl * selected_mask.to(
+        sampled_reverse_kl.dtype
+    )
     valid_student_log_probs = student_log_probs[response_mask_bool].float()
     valid_teacher_log_probs = teacher_log_probs[response_mask_bool].float()
+    valid_gap = sampled_reverse_kl[response_mask_bool].float().abs()
+    selected_gap = sampled_reverse_kl[selected_mask].float().abs()
+    base_signal = sampled_reverse_kl
+    if loss_config.loss_max_clamp is not None:
+        base_signal = base_signal.clamp(
+            min=-loss_config.loss_max_clamp,
+            max=loss_config.loss_max_clamp,
+        )
+    valid_base_signal = base_signal[response_mask_bool].float()
+    valid_selected_signal = (
+        base_signal * selected_mask.to(base_signal.dtype)
+    )[response_mask_bool].float()
     metrics = {
         "distillation/reverse_kl_estimate": Metric(
             AggregationType.MEAN, sampled_reverse_kl[response_mask_bool].mean()
@@ -495,6 +714,22 @@ def compute_sampled_token_reverse_kl(
         "distillation/teacher_sampled_token_prob": Metric(
             AggregationType.MEAN, valid_teacher_log_probs.exp().mean()
         ),
+        "distillation/selected_token_ratio": Metric(
+            AggregationType.MEAN,
+            selected_mask[response_mask_bool].float().mean(),
+        ),
+        "distillation/selection_gap_mean": Metric(
+            AggregationType.MEAN, valid_gap.mean()
+        ),
+        "distillation/selected_gap_mean": Metric(
+            AggregationType.MEAN,
+            selected_gap.mean() if selected_gap.numel() else valid_gap.new_zeros(()),
+        ),
+        "distillation/selection_gradient_signal_relative_change": Metric(
+            AggregationType.MEAN,
+            torch.linalg.vector_norm(valid_selected_signal - valid_base_signal)
+            / torch.linalg.vector_norm(valid_base_signal).clamp_min(1e-12),
+        ),
     }
     track_outcome_metrics = (
         bool(tu.get_non_tensor_data(data, "track_opd_outcome_metrics", default=False))
@@ -504,8 +739,8 @@ def compute_sampled_token_reverse_kl(
     if track_outcome_metrics and "rm_scores" in data:
         metrics.update(
             compute_opd_outcome_statistics(
-                advantage=-sampled_reverse_kl,
-                response_mask=response_mask_bool,
+                advantage=-selected_reverse_kl,
+                response_mask=selected_mask,
                 rm_scores=data["rm_scores"],
                 statistics_threshold=float(
                     getattr(
@@ -516,7 +751,169 @@ def compute_sampled_token_reverse_kl(
                 ),
             )
         )
+    return selected_reverse_kl, metrics
+
+
+@register_distillation_loss(
+    DistillationLossSettings(
+        names=["eopd"],
+        use_topk=True,
+        use_full_vocab_teacher_entropy=True,
+    )
+)  # type: ignore[arg-type]
+def compute_eopd_sampled_token_reverse_kl(
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
+    model_output: dict,
+    data: TensorDict,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Return standard sampled-token OPD plus EOPD-specific diagnostics.
+
+    The returned tensor is exactly the existing OPD reverse-KL estimator.  The
+    differentiable Forward KL is combined separately in ``distillation_loss``
+    so its gradient is not detached or routed through REINFORCE.
+    """
+
+    del config
+    student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
+    teacher_log_probs = no_padding_2_padding(
+        data["teacher_sampled_logprobs"], data
+    ).squeeze(-1)
+    teacher_entropy = no_padding_2_padding(data["teacher_entropy"], data).squeeze(
+        -1
+    )
+    forward_kl = no_padding_2_padding(
+        model_output["distillation_losses"], data
+    )
+    if data["response_mask"].is_nested:
+        response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
+    else:
+        response_mask_bool = data["response_mask"].bool()
+    if not (
+        student_log_probs.shape
+        == teacher_log_probs.shape
+        == teacher_entropy.shape
+        == forward_kl.shape
+        == response_mask_bool.shape
+    ):
+        raise ValueError("EOPD token tensors must have identical response shapes.")
+
+    sampled_reverse_kl = student_log_probs - teacher_log_probs
+    valid = response_mask_bool
+    high_entropy = (
+        teacher_entropy > distillation_config.distillation_loss.eopd_entropy_threshold
+    ) & valid
+    metrics = {
+        "distillation/reverse_kl_estimate": Metric(
+            AggregationType.MEAN, sampled_reverse_kl[valid].mean()
+        ),
+        "distillation/student_sampled_token_prob": Metric(
+            AggregationType.MEAN, student_log_probs[valid].float().exp().mean()
+        ),
+        "distillation/teacher_sampled_token_prob": Metric(
+            AggregationType.MEAN, teacher_log_probs[valid].float().exp().mean()
+        ),
+        "distillation/eopd_teacher_entropy": Metric(
+            AggregationType.MEAN, teacher_entropy[valid].float().mean()
+        ),
+        "distillation/eopd_high_entropy_token_ratio": Metric(
+            AggregationType.MEAN, high_entropy[valid].float().mean()
+        ),
+        "distillation/eopd_forward_kl_per_token": Metric(
+            AggregationType.MEAN, forward_kl[valid].float().mean()
+        ),
+    }
     return sampled_reverse_kl, metrics
+
+
+def compute_exopd_advantage(
+    student_log_probs: torch.Tensor,
+    teacher_log_probs: torch.Tensor,
+    reference_log_probs: torch.Tensor,
+    *,
+    exopd_lambda: float = 1.25,
+) -> torch.Tensor:
+    """Return the detached ExOPD token-level advantage.
+
+    ``A = lambda * (log pi_T - log pi_ref) - (log pi_S - log pi_ref)``.
+    The initial student reference and teacher are supplied by forward-only
+    workers; the explicit no-grad region also prevents the Student term inside
+    the advantage from creating an autograd path.
+    """
+
+    if not (
+        student_log_probs.shape == teacher_log_probs.shape == reference_log_probs.shape
+    ):
+        raise ValueError("ExOPD log-probability tensors must have identical shapes.")
+    exopd_lambda = float(exopd_lambda)
+    if not math.isfinite(exopd_lambda) or exopd_lambda < 0:
+        raise ValueError(
+            "ExOPD lambda must be finite and non-negative, got "
+            f"{exopd_lambda}."
+        )
+
+    with torch.no_grad():
+        advantage = exopd_lambda * (teacher_log_probs - reference_log_probs) - (
+            student_log_probs - reference_log_probs
+        )
+    return advantage
+
+
+@register_distillation_loss(
+    DistillationLossSettings(names=["exopd_reverse_kl"], use_estimator=True)
+)  # type: ignore[arg-type]
+def compute_exopd_sampled_token_loss(
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
+    model_output: dict,
+    data: TensorDict,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Return ``-A_ExOPD`` for the shared detached REINFORCE loss path."""
+
+    del config
+    student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
+    teacher_log_probs = no_padding_2_padding(data["teacher_logprobs"], data).squeeze(-1)
+    reference_log_probs = data["ref_log_prob"]
+    if reference_log_probs.is_nested:
+        reference_log_probs = reference_log_probs.to_padded_tensor(0.0)
+    if data["response_mask"].is_nested:
+        response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
+    else:
+        response_mask_bool = data["response_mask"].bool()
+    assert (
+        student_log_probs.shape
+        == teacher_log_probs.shape
+        == reference_log_probs.shape
+        == response_mask_bool.shape
+    )
+
+    advantage = compute_exopd_advantage(
+        student_log_probs,
+        teacher_log_probs,
+        reference_log_probs,
+        exopd_lambda=distillation_config.distillation_loss.exopd_lambda,
+    )
+    valid = response_mask_bool
+    valid_advantage = advantage[valid].float()
+    metrics = {
+        "distillation/exopd_advantage_mean": Metric(
+            AggregationType.MEAN, valid_advantage.mean()
+        ),
+        "distillation/exopd_advantage_abs_mean": Metric(
+            AggregationType.MEAN, valid_advantage.abs().mean()
+        ),
+        "distillation/student_sampled_token_prob": Metric(
+            AggregationType.MEAN, student_log_probs[valid].float().exp().mean()
+        ),
+        "distillation/teacher_sampled_token_prob": Metric(
+            AggregationType.MEAN, teacher_log_probs[valid].float().exp().mean()
+        ),
+        "distillation/exopd_reference_sampled_token_prob": Metric(
+            AggregationType.MEAN, reference_log_probs[valid].float().exp().mean()
+        ),
+    }
+    # distillation_loss() passes -loss.detach() to REINFORCE, recovering A.
+    return -advantage, metrics
 
 
 def compute_calibrated_opd_advantage(
@@ -756,169 +1153,3 @@ def compute_privilege_sensitive_reverse_kl(
         ),
     }
     return weighted_reverse_kl, metrics
-
-
-@register_distillation_loss(DistillationLossSettings(names=["random_reverse_kl"], use_estimator=True))  # type: ignore[arg-type]
-def compute_random_sampled_token_reverse_kl(
-    config: ActorConfig,
-    distillation_config: DistillationConfig,
-    model_output: dict,
-    data: TensorDict,
-) -> tuple[torch.Tensor, dict[str, Any]]:
-    """Apply sampled-token reverse KL to an independently random token subset.
-
-    Every valid response token is retained with probability
-    ``random_token_ratio``.  The mask is resampled for each loss invocation,
-    so this remains standard sampled-token OPD on the retained tokens while
-    contributing exactly zero policy-gradient signal on the others.
-    """
-    del config
-    student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
-    teacher_log_probs = no_padding_2_padding(data["teacher_logprobs"], data).squeeze(-1)
-    if data["response_mask"].is_nested:
-        response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
-    else:
-        response_mask_bool = data["response_mask"].bool()
-    assert teacher_log_probs.shape == student_log_probs.shape == response_mask_bool.shape
-
-    loss_config = distillation_config.distillation_loss
-    base_reverse_kl = student_log_probs - teacher_log_probs
-    if loss_config.loss_max_clamp is not None:
-        base_reverse_kl = base_reverse_kl.clamp(
-            min=-loss_config.loss_max_clamp,
-            max=loss_config.loss_max_clamp,
-        )
-
-    selected_mask = torch.rand_like(base_reverse_kl, dtype=torch.float32) < float(
-        loss_config.random_token_ratio
-    )
-    selected_mask &= response_mask_bool
-    selected_reverse_kl = base_reverse_kl * selected_mask.to(base_reverse_kl.dtype)
-
-    valid_base_signal = base_reverse_kl[response_mask_bool].float()
-    valid_selected_signal = selected_reverse_kl[response_mask_bool].float()
-    metrics = {
-        "distillation/reverse_kl_estimate": Metric(
-            AggregationType.MEAN, valid_base_signal.mean()
-        ),
-        "distillation/student_sampled_token_prob": Metric(
-            AggregationType.MEAN, student_log_probs[response_mask_bool].float().exp().mean()
-        ),
-        "distillation/teacher_sampled_token_prob": Metric(
-            AggregationType.MEAN, teacher_log_probs[response_mask_bool].float().exp().mean()
-        ),
-        "distillation/random_selected_token_ratio": Metric(
-            AggregationType.MEAN, selected_mask[response_mask_bool].float().mean()
-        ),
-        "distillation/random_gradient_signal_relative_change": Metric(
-            AggregationType.MEAN,
-            torch.linalg.vector_norm(valid_selected_signal - valid_base_signal)
-            / torch.linalg.vector_norm(valid_base_signal).clamp_min(1e-12),
-        ),
-    }
-    return selected_reverse_kl, metrics
-
-
-@register_distillation_loss(DistillationLossSettings(names=["topgap_reverse_kl"], use_estimator=True))  # type: ignore[arg-type]
-def compute_topgap_sampled_token_reverse_kl(
-    config: ActorConfig,
-    distillation_config: DistillationConfig,
-    model_output: dict,
-    data: TensorDict,
-) -> tuple[torch.Tensor, dict[str, Any]]:
-    """Retain a per-response fraction ranked by ``|log T - log S|``."""
-    del config
-    student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
-    teacher_log_probs = no_padding_2_padding(data["teacher_logprobs"], data).squeeze(-1)
-    if data["response_mask"].is_nested:
-        response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
-    else:
-        response_mask_bool = data["response_mask"].bool()
-    assert teacher_log_probs.shape == student_log_probs.shape == response_mask_bool.shape
-
-    loss_config = distillation_config.distillation_loss
-    base_reverse_kl = student_log_probs - teacher_log_probs
-    if loss_config.loss_max_clamp is not None:
-        base_reverse_kl = base_reverse_kl.clamp(
-            min=-loss_config.loss_max_clamp,
-            max=loss_config.loss_max_clamp,
-        )
-
-    gap = (teacher_log_probs - student_log_probs).abs()
-    selected_mask = torch.zeros_like(response_mask_bool)
-    ratio = float(loss_config.topgap_token_ratio)
-    largest = str(loss_config.topgap_selection) == "top"
-    if ratio > 0.0:
-        for row in range(response_mask_bool.shape[0]):
-            valid_indices = response_mask_bool[row].nonzero(as_tuple=False).squeeze(-1)
-            valid_count = int(valid_indices.numel())
-            if valid_count == 0:
-                continue
-            selected_count = min(valid_count, max(1, math.ceil(valid_count * ratio)))
-            ranked_indices = torch.topk(
-                gap[row, valid_indices], k=selected_count, largest=largest, sorted=False
-            ).indices
-            selected_mask[row, valid_indices[ranked_indices]] = True
-
-    selected_reverse_kl = base_reverse_kl * selected_mask.to(base_reverse_kl.dtype)
-    base_signal = base_reverse_kl[response_mask_bool].float()
-    selected_signal = selected_reverse_kl[response_mask_bool].float()
-    valid_gap = gap[response_mask_bool].float()
-    selected_gap = gap[selected_mask].float()
-    selected_student_prob = student_log_probs[selected_mask].float().exp()
-    selected_teacher_prob = teacher_log_probs[selected_mask].float().exp()
-    selected_min_prob = torch.minimum(selected_student_prob, selected_teacher_prob)
-    selected_max_prob = torch.maximum(selected_student_prob, selected_teacher_prob)
-    gap_quantiles = torch.quantile(
-        valid_gap, valid_gap.new_tensor([0.50, 0.75, 0.90, 0.95, 0.99])
-    )
-    metrics = {
-        "distillation/reverse_kl_estimate": Metric(AggregationType.MEAN, base_signal.mean()),
-        "distillation/student_sampled_token_prob": Metric(
-            AggregationType.MEAN, student_log_probs[response_mask_bool].float().exp().mean()
-        ),
-        "distillation/teacher_sampled_token_prob": Metric(
-            AggregationType.MEAN, teacher_log_probs[response_mask_bool].float().exp().mean()
-        ),
-        "distillation/topgap_selected_token_ratio": Metric(
-            AggregationType.MEAN, selected_mask[response_mask_bool].float().mean()
-        ),
-        "distillation/topgap_gap_mean": Metric(AggregationType.MEAN, valid_gap.mean()),
-        "distillation/topgap_selected_gap_mean": Metric(
-            AggregationType.MEAN,
-            selected_gap.mean() if selected_gap.numel() else valid_gap.new_zeros(()),
-        ),
-        "distillation/topgap_selected_student_prob_mean": Metric(
-            AggregationType.MEAN, selected_student_prob.mean()
-        ),
-        "distillation/topgap_selected_teacher_prob_mean": Metric(
-            AggregationType.MEAN, selected_teacher_prob.mean()
-        ),
-        "distillation/topgap_selected_student_gt_teacher_ratio": Metric(
-            AggregationType.MEAN, (selected_student_prob > selected_teacher_prob).float().mean()
-        ),
-        "distillation/topgap_selected_both_high_ratio": Metric(
-            AggregationType.MEAN, (selected_min_prob >= 0.1).float().mean()
-        ),
-        "distillation/topgap_selected_mixed_ratio": Metric(
-            AggregationType.MEAN,
-            ((selected_max_prob >= 0.1) & (selected_min_prob < 0.1)).float().mean(),
-        ),
-        "distillation/topgap_selected_both_low_ratio": Metric(
-            AggregationType.MEAN, (selected_max_prob < 0.1).float().mean()
-        ),
-        "distillation/topgap_selected_any_very_low_ratio": Metric(
-            AggregationType.MEAN, (selected_min_prob < 0.01).float().mean()
-        ),
-        "distillation/topgap_gap_p50": Metric(AggregationType.MEAN, gap_quantiles[0]),
-        "distillation/topgap_gap_p75": Metric(AggregationType.MEAN, gap_quantiles[1]),
-        "distillation/topgap_gap_p90": Metric(AggregationType.MEAN, gap_quantiles[2]),
-        "distillation/topgap_gap_p95": Metric(AggregationType.MEAN, gap_quantiles[3]),
-        "distillation/topgap_gap_p99": Metric(AggregationType.MEAN, gap_quantiles[4]),
-        "distillation/topgap_gradient_signal_relative_change": Metric(
-            AggregationType.MEAN,
-            torch.linalg.vector_norm(selected_signal - base_signal)
-            / torch.linalg.vector_norm(base_signal).clamp_min(1e-12),
-        ),
-    }
-    return selected_reverse_kl, metrics

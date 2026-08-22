@@ -8,6 +8,15 @@ from utils.opd_runtime import validate_opd_runtime_config
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+LOSS_DEFAULTS = OmegaConf.load(
+    PROJECT_ROOT
+    / "verl"
+    / "verl"
+    / "trainer"
+    / "config"
+    / "distillation"
+    / "distillation.yaml"
+).distillation_loss
 CONFIG_DIRS = (
     PROJECT_ROOT / "configs" / "p1_pg_opd",
     PROJECT_ROOT / "configs" / "p2_gkd_opd",
@@ -21,6 +30,9 @@ def test_all_production_configs_use_the_complete_length_budget():
 
     for path in paths:
         config = OmegaConf.merge(base, OmegaConf.load(path))
+        config.distillation.distillation_loss = OmegaConf.merge(
+            LOSS_DEFAULTS, config.distillation.distillation_loss
+        )
         rollout = config.actor_rollout_ref.rollout
         teacher = config.distillation.teacher_models.teacher_model.inference
 

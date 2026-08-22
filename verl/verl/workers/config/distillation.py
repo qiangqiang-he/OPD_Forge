@@ -49,8 +49,7 @@ class DistillationLossConfig(BaseConfig):
     use_policy_gradient (bool):
         Whether to incorporate distillation loss as a reward, as done
         by https://thinkingmachines.ai/blog/on-policy-distillation/. Recommended to use loss_mode=k1.
-        Otherwise, distillation loss is directly backpropagated as a supervised loss,
-        as in https://arxiv.org/abs/2306.13649. Recommended to use loss_mode=k3 or forward_kl_topk.
+        Otherwise, distillation loss is directly backpropagated as a supervised loss.
     policy_loss_mode (str):
         Name of the policy loss to use when use_policy_gradient is true.
     clip_ratio (float):
@@ -63,22 +62,27 @@ class DistillationLossConfig(BaseConfig):
         Runtime-populated settings based on loss_mode. Not set by user.
     """
 
-    loss_mode: str = "k3"
-    topk: Optional[int] = 128
+    loss_mode: str = "reverse_kl"
+    topk: Optional[int] = None
     diagnostic_topk: int = 16
+    # EOPD entropy gate threshold (tau).
+    eopd_entropy_threshold: float = 0.8
+    # Weight applied to EOPD's gated Forward KL term (alpha).
+    eopd_alpha: float = 1.0
     sensitivity_threshold: float = 0.05
     w_sens: float = 0.25
     w_stable: float = 1.0
-    random_token_ratio: float = 1.0
-    topgap_token_ratio: float = 1.0
-    topgap_selection: str = "top"
+    selection_ratio: float = 1.0
+    selection_method: str = "random"
     # Multiplier applied to Teacher self-deviation on both sides of Cal-OPD.
     cal_lambda: float = 1.0
+    # Teacher coefficient in A_ExOPD = lambda * (logT - logRef) - (logS - logRef).
+    exopd_lambda: float = 1.25
     # Statistics-only dead zone for classifying standard OPD advantages as
     # positive or negative. It never changes the training signal.
     opd_statistics_threshold: float = 1.0e-4
     sensitivity_stats_dir: Optional[str] = None
-    use_task_rewards: bool = True
+    use_task_rewards: bool = False
     distillation_loss_coef: float = 1.0
     loss_max_clamp: Optional[float] = 10.0
     log_prob_min_clamp: Optional[float] = -10.0
@@ -106,6 +110,15 @@ class DistillationLossConfig(BaseConfig):
         self.loss_settings: DistillationLossSettings = get_distillation_loss_settings(self.loss_mode)
         if self.diagnostic_topk <= 0:
             raise ValueError(f"diagnostic_topk must be positive, got {self.diagnostic_topk}.")
+        if not math.isfinite(self.eopd_entropy_threshold) or self.eopd_entropy_threshold < 0:
+            raise ValueError(
+                "eopd_entropy_threshold must be finite and non-negative, got "
+                f"{self.eopd_entropy_threshold}."
+            )
+        if not math.isfinite(self.eopd_alpha) or self.eopd_alpha < 0:
+            raise ValueError(
+                f"eopd_alpha must be finite and non-negative, got {self.eopd_alpha}."
+            )
         if self.sensitivity_threshold < 0:
             raise ValueError(
                 f"sensitivity_threshold must be non-negative, got {self.sensitivity_threshold}."
@@ -115,25 +128,29 @@ class DistillationLossConfig(BaseConfig):
                 "PS-OPD token weights must be non-negative, got "
                 f"w_sens={self.w_sens}, w_stable={self.w_stable}."
             )
-        if not 0.0 <= self.random_token_ratio <= 1.0:
+        if not 0.0 <= self.selection_ratio <= 1.0:
             raise ValueError(
-                "random_token_ratio must lie in [0, 1], got "
-                f"{self.random_token_ratio}."
+                "selection_ratio must lie in [0, 1], got "
+                f"{self.selection_ratio}."
             )
-        if not 0.0 <= self.topgap_token_ratio <= 1.0:
+        if self.selection_ratio < 1.0 and self.selection_method not in {
+            "random",
+            "topgap",
+            "bottomgap",
+        }:
             raise ValueError(
-                "topgap_token_ratio must lie in [0, 1], got "
-                f"{self.topgap_token_ratio}."
-            )
-        if self.topgap_selection not in {"top", "bottom"}:
-            raise ValueError(
-                "topgap_selection must be 'top' or 'bottom', got "
-                f"{self.topgap_selection!r}."
+                "selection_method must be one of random, topgap, bottomgap; got "
+                f"{self.selection_method!r}."
             )
         if not math.isfinite(self.cal_lambda) or self.cal_lambda < 0:
             raise ValueError(
                 "cal_lambda must be finite and non-negative, got "
                 f"{self.cal_lambda}."
+            )
+        if not math.isfinite(self.exopd_lambda) or self.exopd_lambda < 0:
+            raise ValueError(
+                "exopd_lambda must be finite and non-negative, got "
+                f"{self.exopd_lambda}."
             )
         if self.opd_statistics_threshold < 0:
             raise ValueError(
@@ -146,21 +163,15 @@ class DistillationLossConfig(BaseConfig):
                 f"but got {self.policy_loss_mode}."
             )
 
-        if self.use_policy_gradient and self.loss_mode == "forward_kl_topk":
-            print(
-                "WARNING: forward_kl_topk is most effective as a supervised distillation loss "
-                "(use_policy_gradient=False). With policy gradient, the update uses only the sampled"
-                " token's logprob ∇logπ(a), so the top-k distributional signal (how non-sampled logits "
-                "should move) is largely unused."
-            )
-
         if not self.use_policy_gradient and self.loss_mode in {
             "k1",
             "reverse_kl",
             "cal_reverse_kl",
+            "eopd",
+            "exopd_reverse_kl",
             "ps_reverse_kl",
-            "random_reverse_kl",
-            "topgap_reverse_kl",
+            "uni_opd",
+            "fire_opd",
         }:
             raise ValueError(
                 f"Directly backpropagating {self.loss_mode} is incorrect since its sampled-token loss "
@@ -213,7 +224,12 @@ class DistillationTeacherModelConfig(BaseConfig):
         if self.num_replicas is None:
             raise ValueError("num_replicas must be specified for distillation teacher model config.")
 
-    def validate_and_prepare_for_distillation(self, use_topk: bool, topk: Optional[int]) -> None:
+    def validate_and_prepare_for_distillation(
+        self,
+        use_topk: bool,
+        topk: Optional[int],
+        use_full_vocab_teacher_entropy: bool = False,
+    ) -> None:
         # Prompt + Response from student are fed into teacher as context
         max_model_len = self.inference.max_model_len
         student_prompt_length = self.inference.prompt_length
@@ -227,13 +243,25 @@ class DistillationTeacherModelConfig(BaseConfig):
             )
         self.inference.prompt_length = self.inference.prompt_length + self.inference.response_length
         self.inference.response_length = 1
-        self._validate_topk_logprobs(use_topk=use_topk, topk=topk)
+        self._validate_topk_logprobs(
+            use_topk=use_topk,
+            topk=topk,
+            use_full_vocab_teacher_entropy=use_full_vocab_teacher_entropy,
+        )
 
-    def _validate_topk_logprobs(self, use_topk: bool, topk: Optional[int]) -> None:
-        if not use_topk:
+    def _validate_topk_logprobs(
+        self,
+        use_topk: bool,
+        topk: Optional[int],
+        use_full_vocab_teacher_entropy: bool = False,
+    ) -> None:
+        if not use_topk and not use_full_vocab_teacher_entropy:
             return
         if topk is None:
-            raise ValueError("topk must be specified when use_topk is True.")
+            raise ValueError(
+                "topk must be specified for top-k distillation or exact "
+                "Teacher-entropy transfer."
+            )
 
         engine_name = self.inference.name
         engine_kwargs = self.inference.engine_kwargs
@@ -241,6 +269,33 @@ class DistillationTeacherModelConfig(BaseConfig):
             case "vllm":
                 vllm_engine_kwargs = dict(engine_kwargs.get("vllm", {}))
                 max_logprobs = vllm_engine_kwargs.get("max_logprobs")
+                if use_full_vocab_teacher_entropy:
+                    required_logprobs = int(topk) + 1
+                    if max_logprobs is None:
+                        vllm_engine_kwargs["max_logprobs"] = required_logprobs
+                        max_logprobs = required_logprobs
+                    if max_logprobs < required_logprobs:
+                        raise ValueError(
+                            "Full-vocabulary Teacher entropy requires vLLM "
+                            "max_logprobs >= topk + 1; got "
+                            f"{max_logprobs} < {required_logprobs}."
+                        )
+                    entropy_topk = vllm_engine_kwargs.get(
+                        "full_vocab_entropy_topk",
+                        vllm_engine_kwargs.get("eopd_entropy_topk", topk),
+                    )
+                    if int(entropy_topk) != int(topk):
+                        raise ValueError(
+                            "vLLM full-vocabulary entropy topk must match "
+                            "distillation topk."
+                        )
+                    if not any(
+                        key in vllm_engine_kwargs
+                        for key in ("full_vocab_entropy_topk", "eopd_entropy_topk")
+                    ):
+                        vllm_engine_kwargs["full_vocab_entropy_topk"] = int(topk)
+                    engine_kwargs["vllm"] = vllm_engine_kwargs
+                    return
                 if max_logprobs is None:
                     vllm_engine_kwargs["max_logprobs"] = topk
                     max_logprobs = topk
@@ -251,6 +306,10 @@ class DistillationTeacherModelConfig(BaseConfig):
                     )
                 engine_kwargs["vllm"] = vllm_engine_kwargs
             case "sglang":
+                if use_full_vocab_teacher_entropy:
+                    raise NotImplementedError(
+                        "Full-vocabulary Teacher entropy currently requires vLLM."
+                    )
                 # SGLang's top_logprobs_num is a per-request parameter, so there is no
                 # engine-boot cap to align (unlike vLLM's max_logprobs). The async
                 # server translates sampling_params["prompt_logprobs"] into
@@ -336,6 +395,9 @@ class DistillationConfig(BaseConfig):
             teacher_model.validate_and_prepare_for_distillation(
                 use_topk=self.distillation_loss.loss_settings.use_topk,
                 topk=self.distillation_loss.topk,
+                use_full_vocab_teacher_entropy=(
+                    self.distillation_loss.loss_settings.use_full_vocab_teacher_entropy
+                ),
             )
             teacher_world_size_sum += teacher_model.world_size
         total_pool_size = self.n_gpus_per_node * self.nnodes

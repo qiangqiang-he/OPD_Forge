@@ -257,6 +257,8 @@ class FSDPEngineConfig(EngineConfig):
     entropy_from_logits_with_chunking: bool = False
     use_torch_compile: bool = True
     entropy_checkpointing: bool = False
+    # Keep a forward-only model resident on its device instead of forcing CPU offload.
+    forward_only_keep_on_device: bool = False
     strategy: str = "fsdp"
     qat: QATEngineConfig = field(default_factory=QATEngineConfig)
 

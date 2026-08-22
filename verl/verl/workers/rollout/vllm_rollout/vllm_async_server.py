@@ -215,6 +215,20 @@ class vLLMHttpServer:
         # 1. setup vllm serve cli args
         engine_kwargs = self.config.get("engine_kwargs", {}).get(self._get_engine_kwargs_key(), {}) or {}
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        self._eopd_entropy_topk = engine_kwargs.pop(
+            "full_vocab_entropy_topk", None
+        )
+        legacy_eopd_entropy_topk = engine_kwargs.pop("eopd_entropy_topk", None)
+        if self._eopd_entropy_topk is None:
+            self._eopd_entropy_topk = legacy_eopd_entropy_topk
+        elif (
+            legacy_eopd_entropy_topk is not None
+            and int(legacy_eopd_entropy_topk) != int(self._eopd_entropy_topk)
+        ):
+            raise ValueError(
+                "full_vocab_entropy_topk and eopd_entropy_topk must match "
+                "when both are configured."
+            )
         if self.config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": self.config.get("limit_images")}
         if self.config.cudagraph_capture_sizes:
@@ -403,6 +417,11 @@ class vLLMHttpServer:
         await engine_client.collective_rpc(
             method="monkey_patch_model", kwargs={"vocab_size": len(self.model_config.tokenizer)}
         )
+        if self._eopd_entropy_topk is not None:
+            await engine_client.collective_rpc(
+                method="enable_eopd_teacher_entropy",
+                kwargs={"topk": int(self._eopd_entropy_topk)},
+            )
 
         build_app_sig = inspect.signature(build_app)
         supported_tasks: tuple[Any, ...] = ()
@@ -464,6 +483,7 @@ class vLLMHttpServer:
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         priority: int = 0,
+        prompt_logprobs_topk: Optional[int] = None,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
         prompt_ids = normalize_token_ids(prompt_ids)
@@ -564,6 +584,7 @@ class vLLMHttpServer:
             output=final_res,
             num_prompt_logprobs=sampling_params.prompt_logprobs,
             result_dict=extra_fields,
+            prompt_logprobs_topk=prompt_logprobs_topk,
         )
         extra_fields["prompt_logprobs_extract_s"] = time.perf_counter() - logprob_extract_started_at
         token_ids = final_res.outputs[0].token_ids

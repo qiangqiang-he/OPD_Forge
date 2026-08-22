@@ -1,4 +1,4 @@
-"""Signed REINFORCE on-policy distillation.
+"""Signed REINFORCE on-policy distillation with configurable token selection.
 
 For student-sampled actions, PG-OPD uses
 
@@ -11,7 +11,11 @@ distillation path negates and detaches it before applying REINFORCE.
 
 from __future__ import annotations
 
-from utils.opd_runtime import BaseOPDTrainer, validate_opd_runtime_config
+from utils.opd_runtime import (
+    BaseOPDTrainer,
+    validate_opd_runtime_config,
+    validate_token_selection_config,
+)
 
 
 PG_OPD_VARIANT = "pg_opd"
@@ -28,6 +32,7 @@ def validate_pg_opd_config(config) -> None:
         raise ValueError("PG-OPD requires loss_mode=reverse_kl.")
     if str(loss.policy_loss_mode) != "reinforce":
         raise ValueError("PG-OPD requires policy_loss_mode=reinforce.")
+    validate_token_selection_config(loss)
 
 
 class PGOPDTrainer(BaseOPDTrainer):
@@ -44,6 +49,16 @@ class PGOPDTrainer(BaseOPDTrainer):
         return {
             "actor/distillation/reverse_kl_estimate": (
                 "pg-opd/train/reverse_kl_estimate"
+            ),
+            "actor/distillation/selected_token_ratio": (
+                "pg-opd/train/selected_token_ratio"
+            ),
+            "actor/distillation/selection_gap_mean": "pg-opd/train/gap_mean",
+            "actor/distillation/selected_gap_mean": (
+                "pg-opd/train/selected_gap_mean"
+            ),
+            "actor/distillation/selection_gradient_signal_relative_change": (
+                "pg-opd/train/gradient_signal_relative_change"
             ),
             "actor/distillation/loss": "pg-opd/train/policy_loss",
         }

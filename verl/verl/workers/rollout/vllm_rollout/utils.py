@@ -103,6 +103,65 @@ def monkey_patch_compute_logits(model, vocab_size: int):
     model.compute_logits = MethodType(compute_logits, model)
 
 
+def enable_eopd_entropy_gather(sampler, topk: int) -> None:
+    """Add full-vocabulary entropy to vLLM's bounded prompt-logprob output.
+
+    EOPD requests ``topk + 1`` prompt logprobs.  The patched gather computes
+    entropy from the already-materialized full-vocabulary log-softmax, keeps
+    only the requested Top-k, and uses the final bounded output slot as an
+    entropy carrier.  Thus no full-vocabulary tensor or Python object crosses
+    the vLLM worker boundary.
+    """
+
+    topk = int(topk)
+    if topk <= 0:
+        raise ValueError(f"EOPD Top-k must be positive, got {topk}.")
+    if getattr(sampler, "_verl_eopd_entropy_topk", None) == topk:
+        return
+    original_gather_logprobs = sampler.gather_logprobs
+    requested_logprobs = topk + 1
+
+    def gather_logprobs(logprobs, num_logprobs, token_ids):
+        if int(num_logprobs) != requested_logprobs:
+            return original_gather_logprobs(logprobs, num_logprobs, token_ids)
+
+        # Ask the original gather for two candidates outside the retained
+        # Top-k. At least one cannot equal the sampled token and is therefore a
+        # collision-free, tokenizer-valid carrier id.
+        gathered = original_gather_logprobs(
+            logprobs, requested_logprobs + 1, token_ids
+        )
+        sampled_ids = gathered.logprob_token_ids[:, 0]
+        first_carrier = gathered.logprob_token_ids[:, topk + 1]
+        second_carrier = gathered.logprob_token_ids[:, topk + 2]
+        carrier_ids = torch.where(
+            first_carrier == sampled_ids, second_carrier, first_carrier
+        ).unsqueeze(-1)
+
+        probabilities = logprobs.exp()
+        entropy = torch.special.entr(probabilities).sum(dim=-1, keepdim=True)
+        retained_ids = torch.cat(
+            (gathered.logprob_token_ids[:, : topk + 1], carrier_ids), dim=-1
+        )
+        retained_logprobs = torch.cat(
+            (gathered.logprobs[:, : topk + 1], entropy), dim=-1
+        )
+        # The engine assigns ranks 1..topk+1 to the retained non-sampled
+        # slots. Keep the sampled slot outside that range so only the final
+        # slot is interpreted as the entropy carrier.
+        sampled_ranks = torch.full_like(
+            gathered.selected_token_ranks, requested_logprobs + 1
+        )
+        return gathered._replace(
+            logprob_token_ids=retained_ids,
+            logprobs=retained_logprobs,
+            selected_token_ranks=sampled_ranks,
+        )
+
+    sampler.gather_logprobs = gather_logprobs
+    sampler._verl_eopd_entropy_topk = topk
+
+
 class vLLMColocateWorkerExtension:
     """
     The class for vLLM's worker to inherit from, in the colocate setting.
@@ -193,6 +252,11 @@ class vLLMColocateWorkerExtension:
             monkey_patch_compute_logits(model, vocab_size)
             # patch weight loader to support MoE model
             patch_vllm_moe_model_weight_loader(model)
+
+    def enable_eopd_teacher_entropy(self, topk: int):
+        """Enable bounded exact-entropy prompt-logprob output on this worker."""
+
+        enable_eopd_entropy_gather(self.model_runner.sampler, topk)
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
@@ -359,13 +423,26 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
     return cli_args
 
 
-def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional[int], result_dict: dict[str, list]):
+def extract_prompt_logprobs(
+    output: RequestOutput,
+    num_prompt_logprobs: Optional[int],
+    result_dict: dict[str, list],
+    prompt_logprobs_topk: Optional[int] = None,
+):
     """Extract prompt log probabilities from generation output."""
     if num_prompt_logprobs is None:
         return
+    if prompt_logprobs_topk is not None:
+        if prompt_logprobs_topk <= 0:
+            raise ValueError("EOPD prompt-logprob Top-k must be positive.")
+        if num_prompt_logprobs != prompt_logprobs_topk + 1:
+            raise ValueError(
+                "EOPD prompt logprobs must reserve exactly one entropy slot."
+            )
 
     prompt_logprobs_ls, prompt_ids_ls = [], []
     sampled_logprobs_ls, sampled_ids_ls = [], []
+    prompt_entropies_ls = []
     # NOTE: logprob of first prompt token is None.
     for position, logprobs_dict in enumerate(output.prompt_logprobs[1:], start=1):
         sampled_id = int(output.prompt_token_ids[position])
@@ -374,7 +451,29 @@ def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional
             raise KeyError(f"Sampled prompt token {sampled_id} is missing from vLLM prompt_logprobs.")
         sampled_ids_ls.append([sampled_id])
         sampled_logprobs_ls.append([sampled_value.logprob])
-        if num_prompt_logprobs == 0:
+        if prompt_logprobs_topk is not None:
+            prompt_ids = [None] * prompt_logprobs_topk
+            prompt_logprobs = [None] * prompt_logprobs_topk
+            entropy = None
+            for token_id_str, token_logprob in logprobs_dict.items():
+                rank = int(token_logprob.rank)
+                if rank == num_prompt_logprobs:
+                    entropy = float(token_logprob.logprob)
+                    continue
+                if rank <= prompt_logprobs_topk:
+                    prompt_ids[rank - 1] = int(token_id_str)
+                    prompt_logprobs[rank - 1] = float(token_logprob.logprob)
+            if any(value is None for value in prompt_ids + prompt_logprobs):
+                raise RuntimeError(
+                    "vLLM EOPD prompt logprobs did not contain the "
+                    f"requested Top-{prompt_logprobs_topk}."
+                )
+            if entropy is None:
+                raise RuntimeError("vLLM EOPD prompt logprobs omitted Teacher entropy.")
+            prompt_ids_ls.append(prompt_ids)
+            prompt_logprobs_ls.append(prompt_logprobs)
+            prompt_entropies_ls.append([entropy])
+        elif num_prompt_logprobs == 0:
             token_id_str = list(logprobs_dict.keys())[0]
             logprob = logprobs_dict[token_id_str].logprob
             prompt_logprobs_ls.append([logprob])
@@ -395,12 +494,17 @@ def extract_prompt_logprobs(output: RequestOutput, num_prompt_logprobs: Optional
             prompt_ids_ls.append(prompt_ids)
 
     # NOTE: pad a dummy prompt logprob for last prompt token.
-    prompt_logprobs_ls.append([0.0] * max(num_prompt_logprobs, 1))
-    prompt_ids_ls.append([0] * max(num_prompt_logprobs, 1))
+    output_width = prompt_logprobs_topk or max(num_prompt_logprobs, 1)
+    prompt_logprobs_ls.append([0.0] * output_width)
+    prompt_ids_ls.append([0] * output_width)
     sampled_logprobs_ls.append([0.0])
     sampled_ids_ls.append([0])
+    if prompt_logprobs_topk is not None:
+        prompt_entropies_ls.append([0.0])
 
     result_dict["prompt_ids"] = prompt_ids_ls
     result_dict["prompt_logprobs"] = prompt_logprobs_ls
     result_dict["prompt_sampled_ids"] = sampled_ids_ls
     result_dict["prompt_sampled_logprobs"] = sampled_logprobs_ls
+    if prompt_logprobs_topk is not None:
+        result_dict["prompt_entropies"] = prompt_entropies_ls

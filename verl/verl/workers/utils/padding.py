@@ -93,6 +93,16 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
         data["teacher_logprobs"] = teacher_logprobs_nested
         data["teacher_ids"] = teacher_ids_nested
 
+    for field_name in ("teacher_sampled_logprobs", "teacher_entropy"):
+        teacher_values = data.get(field_name, None)
+        if teacher_values is not None:
+            teacher_values_rmpad = index_first_axis(
+                teacher_values.unsqueeze(-1).flatten(0, 1), indices
+            )
+            data[field_name] = torch.nested.nested_tensor_from_jagged(
+                teacher_values_rmpad.squeeze(-1), offsets=cu_seqlens
+            )
+
     privileged_teacher_logprobs = data.get("privileged_teacher_logprobs", None)
     if privileged_teacher_logprobs is not None:
         privileged_logprobs_rmpad = index_first_axis(

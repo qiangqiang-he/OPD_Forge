@@ -113,7 +113,12 @@ def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
 
 
 def should_track_opd_reward_metrics(config) -> bool:
-    """Enable training outcome metrics only for fully no-thinking OPD runs."""
+    """Enable training grading when an OPD algorithm consumes outcomes.
+
+    Standard OPD uses training rewards only for no-thinking diagnostics.
+    Uni-OPD requires binary verifier outcomes in both prompt modes because
+    correctness balancing and margin calibration are part of its objective.
+    """
 
     if config is None:
         return False
@@ -122,6 +127,14 @@ def should_track_opd_reward_metrics(config) -> bool:
         if hasattr(config, "get")
         else lambda key, default: getattr(config, key, default)
     )
+    algorithm = get_value("algorithm", {})
+    algorithm_name = (
+        algorithm.get("name", "")
+        if hasattr(algorithm, "get")
+        else getattr(algorithm, "name", "")
+    )
+    if str(algorithm_name) == "uni_opd":
+        return True
     return (
         str(get_value("student_prompt", "")) == "qwen3_no_thinking_prompt"
         and str(get_value("teacher_prompt", "")) == "qwen3_no_thinking_prompt"
@@ -1608,14 +1621,19 @@ class PPOTrainer:
             if is_distillation_enabled(self.config.get("distillation"))
             else False
         )
+        distillation_combined_topk = bool(distillation_use_topk) and (
+            self.distillation_config.distillation_loss.loss_mode == "eopd"
+        )
         extra_info = {
             "calculate_entropy": calculate_entropy,
             "distillation_use_topk": distillation_use_topk,
             "distillation_direct_chunked": bool(distillation_use_topk)
             and not bool(self.distillation_config.distillation_loss.use_task_rewards)
             and not bool(self.distillation_config.distillation_loss.use_policy_gradient),
+            "distillation_combined_topk": distillation_combined_topk,
             "distillation_chunk_size": int(self.distillation_config.student_chunk_size),
             "distillation_log_prob_min_clamp": self.distillation_config.distillation_loss.log_prob_min_clamp,
+            "eopd_entropy_threshold": self.distillation_config.distillation_loss.eopd_entropy_threshold,
             "global_batch_size": ppo_mini_batch_size,
             "mini_batch_size": ppo_mini_batch_size,
             "epochs": self.config.actor_rollout_ref.actor.ppo_epochs,
@@ -1893,14 +1911,15 @@ class PPOTrainer:
         # 4. balance batch across data parallel groups
         batch = self._balance_batch(batch, metrics=metrics)
 
-        # 5. compute old_log_prob
-        with marked_timer("old_log_prob", timing_raw, color="blue"):
-            batch = self._compute_old_log_prob(batch, metrics=metrics)
-
-        # 6. [OPTIONAL] compute ref_log_prob
+        # 5. [OPTIONAL] compute frozen-reference log probabilities first. This
+        # keeps the ExOPD reference pass entirely separate from actor autograd.
         if self.use_reference_policy:
             with marked_timer("ref", timing_raw, color="olive"):
                 batch = self._compute_ref_log_prob(batch, metrics=metrics)
+
+        # 6. compute current-student old_log_prob
+        with marked_timer("old_log_prob", timing_raw, color="blue"):
+            batch = self._compute_old_log_prob(batch, metrics=metrics)
 
         # 7. [OPTIONAL] compute critic values
         if self.use_critic:

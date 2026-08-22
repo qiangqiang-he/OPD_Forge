@@ -12,9 +12,8 @@ from verl.trainer.distillation import losses
 def _config(**loss_overrides):
     loss = {
         "loss_max_clamp": None,
-        "random_token_ratio": 1.0,
-        "topgap_token_ratio": 1.0,
-        "topgap_selection": "top",
+        "selection_ratio": 1.0,
+        "selection_method": "random",
     }
     loss.update(loss_overrides)
     return SimpleNamespace(distillation_loss=SimpleNamespace(**loss))
@@ -179,25 +178,33 @@ def test_pg_opd_outcome_statistics_ignore_padding_only_microbatch():
     assert all(metric.aggregate() == 0.0 for metric in sufficient.values())
 
 
-def test_random_pg_opd_preserves_sign_on_selected_tokens(monkeypatch):
+def test_random_selection_preserves_sign_on_selected_tokens(monkeypatch):
     _identity_unpadding(monkeypatch)
     model_output, data = _data(student=[-0.2, -2.0], teacher=[-1.2, -1.0])
+    monkeypatch.setattr(
+        torch,
+        "rand_like",
+        lambda tensor, dtype=None: torch.tensor([[0.1, 0.9]], device=tensor.device),
+    )
 
-    reverse_kl, _ = losses.compute_random_sampled_token_reverse_kl(
-        None, _config(random_token_ratio=1.0), model_output, data
+    reverse_kl, _ = losses.compute_sampled_token_reverse_kl(
+        None,
+        _config(selection_ratio=0.5, selection_method="random"),
+        model_output,
+        data,
     )
 
     advantage = -reverse_kl
-    torch.testing.assert_close(advantage, torch.tensor([[-1.0, 1.0]]))
+    torch.testing.assert_close(advantage, torch.tensor([[-1.0, 0.0]]))
 
 
 def test_topgap_ranks_by_absolute_gap_but_preserves_selected_sign(monkeypatch):
     _identity_unpadding(monkeypatch)
     model_output, data = _data(student=[-0.1, -2.0], teacher=[-2.0, -1.0])
 
-    reverse_kl, _ = losses.compute_topgap_sampled_token_reverse_kl(
+    reverse_kl, _ = losses.compute_sampled_token_reverse_kl(
         None,
-        _config(topgap_token_ratio=0.5, topgap_selection="top"),
+        _config(selection_ratio=0.5, selection_method="topgap"),
         model_output,
         data,
     )
@@ -206,3 +213,32 @@ def test_topgap_ranks_by_absolute_gap_but_preserves_selected_sign(monkeypatch):
     # negative because the student assigns it more probability than the teacher.
     advantage = -reverse_kl
     torch.testing.assert_close(advantage, torch.tensor([[-1.9, 0.0]]))
+
+
+def test_bottomgap_selects_smallest_gap_and_preserves_sign(monkeypatch):
+    _identity_unpadding(monkeypatch)
+    model_output, data = _data(student=[-0.1, -2.0], teacher=[-2.0, -1.0])
+
+    reverse_kl, _ = losses.compute_sampled_token_reverse_kl(
+        None,
+        _config(selection_ratio=0.5, selection_method="bottomgap"),
+        model_output,
+        data,
+    )
+
+    torch.testing.assert_close(-reverse_kl, torch.tensor([[0.0, 1.0]]))
+
+
+def test_full_selection_ignores_method(monkeypatch):
+    _identity_unpadding(monkeypatch)
+    model_output, data = _data(student=[-0.2, -2.0], teacher=[-1.2, -1.0])
+
+    reverse_kl, metrics = losses.compute_sampled_token_reverse_kl(
+        None,
+        _config(selection_ratio=1.0, selection_method="ignored"),
+        model_output,
+        data,
+    )
+
+    torch.testing.assert_close(-reverse_kl, torch.tensor([[-1.0, 1.0]]))
+    assert metrics["distillation/selected_token_ratio"].aggregate() == 1.0

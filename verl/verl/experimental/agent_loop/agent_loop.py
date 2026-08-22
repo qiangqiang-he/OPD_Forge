@@ -167,6 +167,10 @@ class AgentLoopOutput(BaseModel):
             output["teacher_ids"] = teacher_ids
         if teacher_logprobs is not None:
             output["teacher_logprobs"] = teacher_logprobs
+        for field_name in ("teacher_sampled_logprobs", "teacher_entropy"):
+            value = output["extra_fields"].pop(field_name, None)
+            if value is not None:
+                output[field_name] = value
         privileged_teacher_logprobs = output["extra_fields"].pop("privileged_teacher_logprobs", None)
         output["extra_fields"].pop("privileged_teacher_ids", None)
         if privileged_teacher_logprobs is not None:
@@ -208,6 +212,10 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
     """Padded log probabilities from teacher model for prompt/response tokens."""
     teacher_ids: Optional[torch.Tensor] = None
     """Padded token ids corresponding to the teacher log probabilities."""
+    teacher_sampled_logprobs: Optional[torch.Tensor] = None
+    """Padded Teacher log probabilities for Student-sampled response tokens."""
+    teacher_entropy: Optional[torch.Tensor] = None
+    """Padded full-vocabulary Teacher entropy for each response position."""
     privileged_teacher_logprobs: Optional[torch.Tensor] = None
     """Padded teacher log probabilities under the PS-OPD privileged prompt."""
     cal_positive_teacher_logprobs: Optional[torch.Tensor] = None
@@ -813,6 +821,10 @@ class AgentLoopWorker:
             output.extra_fields.pop("teacher_ids", None),
             output.extra_fields.pop("teacher_logprobs", None),
         )
+        teacher_sampled_logprobs = output.extra_fields.pop(
+            "teacher_sampled_logprobs", None
+        )
+        teacher_entropy = output.extra_fields.pop("teacher_entropy", None)
         privileged_teacher_logprobs = output.extra_fields.pop("privileged_teacher_logprobs", None)
         cal_positive_teacher_logprobs = output.extra_fields.pop("cal_positive_teacher_logprobs", None)
         cal_negative_teacher_logprobs = output.extra_fields.pop("cal_negative_teacher_logprobs", None)
@@ -870,6 +882,28 @@ class AgentLoopWorker:
                     response_length=len(output.response_ids),
                     pad_token_id=self.tokenizer.pad_token_id,
                 )
+            if teacher_sampled_logprobs is not None:
+                _, teacher_sampled_logprobs = _pad_teacher_outputs(
+                    teacher_ids=torch.zeros_like(
+                        teacher_sampled_logprobs, dtype=torch.int32
+                    ),
+                    teacher_logprobs=teacher_sampled_logprobs,
+                    prompt_width=prompt_output["input_ids"].shape[1],
+                    response_width=response_output["input_ids"].shape[1],
+                    prompt_length=len(output.prompt_ids),
+                    response_length=len(output.response_ids),
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
+            if teacher_entropy is not None:
+                _, teacher_entropy = _pad_teacher_outputs(
+                    teacher_ids=torch.zeros_like(teacher_entropy, dtype=torch.int32),
+                    teacher_logprobs=teacher_entropy,
+                    prompt_width=prompt_output["input_ids"].shape[1],
+                    response_width=response_output["input_ids"].shape[1],
+                    prompt_length=len(output.prompt_ids),
+                    response_length=len(output.response_ids),
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
 
         return _InternalAgentLoopOutput(
             prompt_ids=prompt_output["input_ids"],
@@ -885,6 +919,8 @@ class AgentLoopWorker:
             mm_processor_kwargs=output.mm_processor_kwargs,
             teacher_logprobs=teacher_logprobs,
             teacher_ids=teacher_ids,
+            teacher_sampled_logprobs=teacher_sampled_logprobs,
+            teacher_entropy=teacher_entropy,
             privileged_teacher_logprobs=privileged_teacher_logprobs,
             cal_positive_teacher_logprobs=cal_positive_teacher_logprobs,
             cal_negative_teacher_logprobs=cal_negative_teacher_logprobs,
@@ -1059,7 +1095,15 @@ class AgentLoopWorker:
 
             timing = {}
             with simple_timer("teacher_forward_s", timing):
-                teacher_ids, teacher_logprobs, teacher_topk_ids, teacher_topk_logprobs, teacher_timing = (
+                (
+                    teacher_ids,
+                    teacher_logprobs,
+                    teacher_topk_ids,
+                    teacher_topk_logprobs,
+                    teacher_sampled_logprobs,
+                    teacher_entropy,
+                    teacher_timing,
+                ) = (
                     await self.teacher_server_manager.compute_teacher_logprobs_single(
                         sequence_ids=teacher_prompt_ids + response_ids,
                         student_prompt_length=len(prompt_ids),
@@ -1101,6 +1145,8 @@ class AgentLoopWorker:
                     (
                         privileged_teacher_ids,
                         privileged_teacher_logprobs,
+                        _,
+                        _,
                         _,
                         _,
                         privileged_teacher_timing,
@@ -1168,8 +1214,8 @@ class AgentLoopWorker:
                     _conditioned_teacher_forward(positive_prompt_ids),
                     _conditioned_teacher_forward(negative_prompt_ids),
                 )
-                positive_ids, positive_logprobs, _, _, _ = positive_result
-                negative_ids, negative_logprobs, _, _, _ = negative_result
+                positive_ids, positive_logprobs, _, _, _, _, _ = positive_result
+                negative_ids, negative_logprobs, _, _, _, _, _ = negative_result
                 output.extra_fields["cal_positive_teacher_ids"] = positive_ids
                 output.extra_fields["cal_positive_teacher_logprobs"] = positive_logprobs
                 output.extra_fields["cal_negative_teacher_ids"] = negative_ids
@@ -1221,6 +1267,11 @@ class AgentLoopWorker:
             output.extra_fields["top16_mass_overlap"] = mass_overlap
             output.extra_fields["teacher_ids"] = teacher_ids
             output.extra_fields["teacher_logprobs"] = teacher_logprobs
+            if teacher_entropy is not None:
+                output.extra_fields["teacher_sampled_logprobs"] = (
+                    teacher_sampled_logprobs
+                )
+                output.extra_fields["teacher_entropy"] = teacher_entropy
             output.extra_fields["teacher_forward_s"] = timing["teacher_forward_s"]
             output.extra_fields.update(teacher_timing)
             output.extra_fields["teacher_queue_transfer_s"] = max(
@@ -1252,6 +1303,14 @@ class AgentLoopWorker:
         if inputs[0].teacher_logprobs is not None and inputs[0].teacher_ids is not None:
             optional_outputs["teacher_logprobs"] = torch.cat([input.teacher_logprobs for input in inputs], dim=0)
             optional_outputs["teacher_ids"] = torch.cat([input.teacher_ids for input in inputs], dim=0)
+        if inputs[0].teacher_sampled_logprobs is not None:
+            optional_outputs["teacher_sampled_logprobs"] = torch.cat(
+                [input.teacher_sampled_logprobs for input in inputs], dim=0
+            )
+        if inputs[0].teacher_entropy is not None:
+            optional_outputs["teacher_entropy"] = torch.cat(
+                [input.teacher_entropy for input in inputs], dim=0
+            )
         if inputs[0].privileged_teacher_logprobs is not None:
             optional_outputs["privileged_teacher_logprobs"] = torch.cat(
                 [input.privileged_teacher_logprobs for input in inputs], dim=0

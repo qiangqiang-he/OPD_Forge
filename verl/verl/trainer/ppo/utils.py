@@ -76,7 +76,17 @@ def need_reference_policy(
     config: DictConfig,
 ) -> bool:
     """Given the config, do we need ref policy."""
-    return config.algorithm.get("use_kl_in_reward", False) or config.actor_rollout_ref.actor.use_kl_loss
+    distillation = config.get("distillation")
+    exopd_enabled = (
+        bool(distillation and distillation.get("enabled", False))
+        and str(distillation.get("distillation_loss", {}).get("loss_mode", ""))
+        == "exopd_reverse_kl"
+    )
+    return (
+        config.algorithm.get("use_kl_in_reward", False)
+        or config.actor_rollout_ref.actor.use_kl_loss
+        or exopd_enabled
+    )
 
 
 def need_teacher_policy(
