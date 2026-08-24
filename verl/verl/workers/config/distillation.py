@@ -74,6 +74,11 @@ class DistillationLossConfig(BaseConfig):
     w_stable: float = 1.0
     selection_ratio: float = 1.0
     selection_method: str = "random"
+    # OA-OPD step intervention threshold, strength, and maximum number of
+    # boundary probes submitted together for one rollout.
+    oa_opd_tau: float = 0.0
+    oa_opd_beta: float = 1.0
+    oa_opd_probe_batch_size: int = 8
     # Multiplier applied to Teacher self-deviation on both sides of Cal-OPD.
     cal_lambda: float = 1.0
     # Teacher coefficient in A_ExOPD = lambda * (logT - logRef) - (logS - logRef).
@@ -142,6 +147,17 @@ class DistillationLossConfig(BaseConfig):
                 "selection_method must be one of random, topgap, bottomgap; got "
                 f"{self.selection_method!r}."
             )
+        if not math.isfinite(self.oa_opd_tau):
+            raise ValueError(f"oa_opd_tau must be finite, got {self.oa_opd_tau}.")
+        if not math.isfinite(self.oa_opd_beta) or self.oa_opd_beta <= 0:
+            raise ValueError(
+                f"oa_opd_beta must be finite and positive, got {self.oa_opd_beta}."
+            )
+        if not 1 <= self.oa_opd_probe_batch_size <= 8:
+            raise ValueError(
+                "oa_opd_probe_batch_size must lie in [1, 8], got "
+                f"{self.oa_opd_probe_batch_size}."
+            )
         if not math.isfinite(self.cal_lambda) or self.cal_lambda < 0:
             raise ValueError(
                 "cal_lambda must be finite and non-negative, got "
@@ -172,6 +188,7 @@ class DistillationLossConfig(BaseConfig):
             "ps_reverse_kl",
             "uni_opd",
             "fire_opd",
+            "oa_opd",
         }:
             raise ValueError(
                 f"Directly backpropagating {self.loss_mode} is incorrect since its sampled-token loss "

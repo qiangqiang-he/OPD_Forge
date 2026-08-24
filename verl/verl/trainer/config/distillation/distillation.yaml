@@ -48,6 +48,13 @@ distillation_loss:
   # Token selection method: random, topgap, or bottomgap.
   selection_method: random
 
+  # OA-OPD step intervention threshold and exponential strength.
+  oa_opd_tau: 0.0
+  oa_opd_beta: 1.0
+
+  # Bound concurrent boundary probes for one rollout to control memory/padding.
+  oa_opd_probe_batch_size: 8
+
   # Multiplier applied to Teacher self-deviation on both sides of Cal-OPD.
   cal_lambda: 1.0
 

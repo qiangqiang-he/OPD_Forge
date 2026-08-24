@@ -46,6 +46,9 @@ ALGORITHM_REGISTRY: dict[str, AlgorithmRegistration] = {
     "fire_opd": AlgorithmRegistration(
         "algorithms.fire_opd", "FiReOPDTrainer", "validate_fire_opd_config"
     ),
+    "oa_opd": AlgorithmRegistration(
+        "algorithms.oa_opd", "OAOPDTrainer", "validate_oa_opd_config"
+    ),
 }
 
 

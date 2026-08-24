@@ -790,6 +790,176 @@ def compute_sampled_token_reverse_kl(
     return selected_reverse_kl, metrics
 
 
+@register_distillation_loss(DistillationLossSettings(names=["oa_opd"], use_estimator=True))  # type: ignore[arg-type]
+def compute_outcome_aware_sampled_token_reverse_kl(
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
+    model_output: dict,
+    data: TensorDict,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Apply semantic-step outcome weights to the sampled-token OPD signal.
+
+    This kernel returns ``w * (logS - logT)``.  The shared policy-gradient
+    path negates and detaches it, yielding the requested advantage
+    ``w * (logT - logS)`` while retaining the full response mask as the loss
+    denominator.
+    """
+
+    student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
+    teacher_log_probs = no_padding_2_padding(
+        data["teacher_logprobs"], data
+    ).squeeze(-1)
+    response_mask = data["response_mask"]
+    response_mask_bool = (
+        response_mask.bool().to_padded_tensor(False)
+        if response_mask.is_nested
+        else response_mask.bool()
+    )
+    weights = data.get("oa_opd_weights", None)
+    if weights is None:
+        raise RuntimeError("OA-OPD actor input is missing oa_opd_weights.")
+    if weights.is_nested:
+        weights = weights.to_padded_tensor(0.0)
+    # Keep intervention weights in float32.  Casting a valid saturated weight
+    # to bf16/fp16 can round it up to exactly 1.0, violating OA-OPD's [0, 1)
+    # invariant and needlessly rejecting a valid batch.
+    weights = weights.to(dtype=torch.float32, device=student_log_probs.device)
+    if not (
+        student_log_probs.shape
+        == teacher_log_probs.shape
+        == response_mask_bool.shape
+        == weights.shape
+    ):
+        raise ValueError(
+            "OA-OPD Student/Teacher logprobs, response mask, and weights must "
+            f"have identical shapes; got {student_log_probs.shape}, "
+            f"{teacher_log_probs.shape}, {response_mask_bool.shape}, and {weights.shape}."
+        )
+    valid_weights = weights[response_mask_bool]
+    if not bool(torch.isfinite(valid_weights).all()):
+        raise ValueError("OA-OPD intervention weights must be finite.")
+    if bool((valid_weights < 0.0).any()) or bool((valid_weights >= 1.0).any()):
+        raise ValueError("OA-OPD intervention weights must lie in [0, 1).")
+    if bool((weights[~response_mask_bool] != 0.0).any()):
+        raise ValueError("OA-OPD padding positions must have zero intervention weight.")
+
+    sampled_reverse_kl = student_log_probs - teacher_log_probs
+    weighted_reverse_kl = sampled_reverse_kl * weights
+    valid_student = student_log_probs[response_mask_bool].float()
+    valid_teacher = teacher_log_probs[response_mask_bool].float()
+    metrics: dict[str, Any] = {
+        "distillation/reverse_kl_estimate": Metric(
+            AggregationType.MEAN,
+            sampled_reverse_kl[response_mask_bool].mean(),
+        ),
+        "distillation/student_sampled_token_prob": Metric(
+            AggregationType.MEAN, valid_student.exp().mean()
+        ),
+        "distillation/teacher_sampled_token_prob": Metric(
+            AggregationType.MEAN, valid_teacher.exp().mean()
+        ),
+    }
+
+    if "rm_scores" not in data:
+        raise RuntimeError("OA-OPD requires rm_scores for correct/wrong metrics.")
+    reward_tensor = data["rm_scores"]
+    if reward_tensor.is_nested:
+        reward_tensor = reward_tensor.to_padded_tensor(0.0)
+    rollout_correct = reward_tensor.float().sum(dim=-1) > 0.5
+    if rollout_correct.shape != (student_log_probs.shape[0],):
+        raise ValueError("OA-OPD rm_scores batch dimension is misaligned.")
+
+    def sequence_field(name: str) -> torch.Tensor:
+        value = data.get(name, None)
+        if value is None:
+            raise RuntimeError(f"OA-OPD actor input is missing {name}.")
+        if value.is_nested:
+            value = value.to_padded_tensor(0.0)
+        value = value.to(device=student_log_probs.device, dtype=torch.float32).reshape(-1)
+        if value.numel() != student_log_probs.shape[0]:
+            raise ValueError(
+                f"OA-OPD {name} must contain one value per trajectory; got "
+                f"{value.numel()} for batch size {student_log_probs.shape[0]}."
+            )
+        return value
+
+    step_count = sequence_field("oa_opd_num_steps")
+    active_step_count = sequence_field("oa_opd_active_steps")
+    probe_failures = sequence_field("oa_opd_probe_failures")
+    if bool((step_count < 0).any()) or bool((active_step_count < 0).any()):
+        raise ValueError("OA-OPD step counts must be non-negative.")
+    if bool((active_step_count > step_count).any()):
+        raise ValueError("OA-OPD active step count cannot exceed total step count.")
+
+    correct_tokens = response_mask_bool & rollout_correct.unsqueeze(-1)
+    wrong_tokens = response_mask_bool & ~rollout_correct.unsqueeze(-1)
+    active_tokens = response_mask_bool & (weights > 0.0)
+    absolute_advantage = sampled_reverse_kl.float().abs()
+    retained_advantage = weighted_reverse_kl.float().abs()
+    stats_prefix = "distillation/oa_opd_stats/"
+
+    def sum_metric(value: torch.Tensor) -> Metric:
+        return Metric(AggregationType.SUM, value)
+
+    raw_stats = {
+        "step_count": step_count.sum(),
+        "active_step_count": active_step_count.sum(),
+        "token_count": response_mask_bool.float().sum(),
+        "active_token_count": active_tokens.float().sum(),
+        "weight_sum": weights[response_mask_bool].float().sum(),
+        "opd_adv_mass": absolute_advantage[response_mask_bool].sum(),
+        "oa_adv_mass": retained_advantage[response_mask_bool].sum(),
+        "probe_failure_count": probe_failures.sum(),
+    }
+    for outcome_name, sequence_mask, token_mask in (
+        ("correct", rollout_correct, correct_tokens),
+        ("wrong", ~rollout_correct, wrong_tokens),
+    ):
+        raw_stats.update(
+            {
+                f"{outcome_name}_step_count": step_count[sequence_mask].sum(),
+                f"{outcome_name}_active_step_count": active_step_count[
+                    sequence_mask
+                ].sum(),
+                f"{outcome_name}_token_count": token_mask.float().sum(),
+                f"{outcome_name}_active_token_count": (
+                    active_tokens & token_mask
+                ).float().sum(),
+                f"{outcome_name}_weight_sum": weights[token_mask].float().sum(),
+                f"{outcome_name}_opd_adv_mass": absolute_advantage[token_mask].sum(),
+                f"{outcome_name}_oa_adv_mass": retained_advantage[token_mask].sum(),
+            }
+        )
+    metrics.update(
+        {
+            f"{stats_prefix}{name}": sum_metric(value)
+            for name, value in raw_stats.items()
+        }
+    )
+
+    track_outcome_metrics = bool(
+        tu.get_non_tensor_data(
+            data, "track_opd_outcome_metrics", default=False
+        )
+    )
+    if track_outcome_metrics:
+        metrics.update(
+            compute_opd_outcome_statistics(
+                advantage=-weighted_reverse_kl,
+                response_mask=response_mask_bool,
+                rm_scores=data["rm_scores"],
+                statistics_threshold=float(
+                    getattr(
+                        distillation_config.distillation_loss,
+                        "opd_statistics_threshold",
+                        1.0e-4,
+                    )
+                ),
+            )
+        )
+    return weighted_reverse_kl, metrics
+
+
 @register_distillation_loss(
     DistillationLossSettings(
         names=["eopd"],

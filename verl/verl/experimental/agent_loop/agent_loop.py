@@ -186,6 +186,19 @@ class AgentLoopOutput(BaseModel):
         teacher_max_logprobs = output["extra_fields"].pop("teacher_max_logprobs", None)
         if teacher_max_logprobs is not None:
             output["teacher_max_logprobs"] = teacher_max_logprobs
+        oa_opd_weights = output["extra_fields"].pop("oa_opd_weights", None)
+        if oa_opd_weights is not None:
+            output["oa_opd_weights"] = torch.as_tensor(
+                oa_opd_weights, dtype=torch.float32
+            )
+        for field_name in (
+            "oa_opd_num_steps",
+            "oa_opd_active_steps",
+            "oa_opd_probe_failures",
+        ):
+            value = output["extra_fields"].pop(field_name, None)
+            if value is not None:
+                output[field_name] = torch.tensor(float(value), dtype=torch.float32)
         return output
 
 
@@ -224,6 +237,14 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
     """Padded teacher log probabilities under Cal-OPD negative feedback."""
     teacher_max_logprobs: Optional[torch.Tensor] = None
     """Padded top-1 teacher log probability for each response position."""
+    oa_opd_weights: Optional[torch.Tensor] = None
+    """Padded response-token intervention weights for OA-OPD."""
+    oa_opd_num_steps: Optional[torch.Tensor] = None
+    """Number of eligible reasoning steps in the response."""
+    oa_opd_active_steps: Optional[torch.Tensor] = None
+    """Number of eligible reasoning steps with a positive intervention weight."""
+    oa_opd_probe_failures: Optional[torch.Tensor] = None
+    """Number of failed boundary probes (diagnostic only)."""
     routed_experts: Optional[torch.Tensor] = None
     """Padded routed experts for the total tokens."""
     multi_modal_inputs: Optional[dict[str, torch.Tensor]] = None
@@ -829,6 +850,25 @@ class AgentLoopWorker:
         cal_positive_teacher_logprobs = output.extra_fields.pop("cal_positive_teacher_logprobs", None)
         cal_negative_teacher_logprobs = output.extra_fields.pop("cal_negative_teacher_logprobs", None)
         teacher_max_logprobs = output.extra_fields.pop("teacher_max_logprobs", None)
+        oa_opd_weights = output.extra_fields.pop("oa_opd_weights", None)
+        oa_opd_num_steps = output.extra_fields.pop("oa_opd_num_steps", None)
+        oa_opd_active_steps = output.extra_fields.pop("oa_opd_active_steps", None)
+        oa_opd_probe_failures = output.extra_fields.pop("oa_opd_probe_failures", None)
+        if oa_opd_weights is not None:
+            if len(oa_opd_weights) != len(output.response_ids):
+                raise ValueError(
+                    "OA-OPD response weights must align one-to-one with original response IDs."
+                )
+            pad_size = self.rollout_config.response_length - len(oa_opd_weights)
+            oa_opd_weights = torch.tensor(
+                oa_opd_weights + [0.0] * pad_size, dtype=torch.float32
+            ).unsqueeze(0)
+        if oa_opd_num_steps is not None:
+            oa_opd_num_steps = torch.tensor([float(oa_opd_num_steps)], dtype=torch.float32)
+        if oa_opd_active_steps is not None:
+            oa_opd_active_steps = torch.tensor([float(oa_opd_active_steps)], dtype=torch.float32)
+        if oa_opd_probe_failures is not None:
+            oa_opd_probe_failures = torch.tensor([float(oa_opd_probe_failures)], dtype=torch.float32)
         if teacher_ids is not None and teacher_logprobs is not None:
             # TODO(wuxibin): remove padding and use tensordict.
             from verl.experimental.teacher_loop.teacher_manager import _pad_teacher_outputs
@@ -925,6 +965,10 @@ class AgentLoopWorker:
             cal_positive_teacher_logprobs=cal_positive_teacher_logprobs,
             cal_negative_teacher_logprobs=cal_negative_teacher_logprobs,
             teacher_max_logprobs=teacher_max_logprobs,
+            oa_opd_weights=oa_opd_weights,
+            oa_opd_num_steps=oa_opd_num_steps,
+            oa_opd_active_steps=oa_opd_active_steps,
+            oa_opd_probe_failures=oa_opd_probe_failures,
             reward_score=output.reward_score,
             num_turns=output.num_turns,
             metrics=output.metrics,
@@ -1117,6 +1161,56 @@ class AgentLoopWorker:
             algorithm_name = str(self.config.algorithm.get("name", ""))
             is_ps_opd = algorithm_name == "ps_opd"
             is_cal_opd = algorithm_name == "cal_opd"
+            is_oa_opd = algorithm_name == "oa_opd"
+            if is_oa_opd:
+                if sample_kwargs is None:
+                    raise RuntimeError("OA-OPD requires rollout answer metadata.")
+
+                def _python_scalar(value):
+                    return value.item() if hasattr(value, "item") else value
+
+                answer = str(
+                    _python_scalar(sample_kwargs.get("oa_ground_truth_answer", ""))
+                )
+                if teacher_prompt_ids != prompt_ids:
+                    raise RuntimeError(
+                        "OA-OPD requires identical no-thinking Student/Teacher prompt "
+                        "token IDs so every probe preserves the original rollout prefix."
+                    )
+                loss_config = self.config.distillation.distillation_loss
+                try:
+                    from utils.oa_opd import compute_oa_opd_for_rollout
+
+                    oa_result = await compute_oa_opd_for_rollout(
+                        tokenizer=self.tokenizer,
+                        teacher_probe=(
+                            self.teacher_server_manager.compute_answer_probe_mean_logprob_single
+                        ),
+                        prompt_ids=prompt_ids,
+                        response_ids=response_ids,
+                        answer=answer,
+                        tau=float(loss_config.oa_opd_tau),
+                        beta=float(loss_config.oa_opd_beta),
+                        probe_batch_size=int(loss_config.oa_opd_probe_batch_size),
+                        routing_key=routing_key,
+                    )
+                    output.extra_fields["oa_opd_weights"] = oa_result.token_weights
+                    output.extra_fields["oa_opd_num_steps"] = float(oa_result.num_steps)
+                    output.extra_fields["oa_opd_active_steps"] = float(
+                        oa_result.active_steps
+                    )
+                    output.extra_fields["oa_opd_probe_failures"] = float(
+                        oa_result.probe_failures
+                    )
+                except Exception as exc:
+                    # Outcome probing is an intervention gate.  A failed gate
+                    # must never silently fall back to full standard OPD;
+                    # conservatively disable intervention for this rollout.
+                    logger.warning("OA-OPD probe failed; using zero weights: %s", exc)
+                    output.extra_fields["oa_opd_weights"] = [0.0] * len(response_ids)
+                    output.extra_fields["oa_opd_num_steps"] = 0.0
+                    output.extra_fields["oa_opd_active_steps"] = 0.0
+                    output.extra_fields["oa_opd_probe_failures"] = 1.0
             if is_ps_opd:
                 if sample_kwargs is None:
                     raise RuntimeError("PS-OPD requires rollout question and answer metadata.")
@@ -1327,6 +1421,19 @@ class AgentLoopWorker:
             optional_outputs["teacher_max_logprobs"] = torch.cat(
                 [input.teacher_max_logprobs for input in inputs], dim=0
             )
+        if inputs[0].oa_opd_weights is not None:
+            optional_outputs["oa_opd_weights"] = torch.cat(
+                [input.oa_opd_weights for input in inputs], dim=0
+            )
+        for field_name in (
+            "oa_opd_num_steps",
+            "oa_opd_active_steps",
+            "oa_opd_probe_failures",
+        ):
+            if getattr(inputs[0], field_name) is not None:
+                optional_outputs[field_name] = torch.cat(
+                    [getattr(input_item, field_name) for input_item in inputs], dim=0
+                )
         batch = TensorDict(
             {
                 "prompts": prompt_ids,  # [bsz, prompt_length]

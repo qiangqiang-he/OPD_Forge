@@ -28,6 +28,7 @@ SUPPORTED_LOSS_MODES = {
     "ps_reverse_kl",
     "uni_opd",
     "fire_opd",
+    "oa_opd",
 }
 
 TOKEN_SELECTION_METHODS = {"random", "topgap", "bottomgap"}

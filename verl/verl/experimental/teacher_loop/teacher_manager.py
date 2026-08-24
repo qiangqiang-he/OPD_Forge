@@ -168,6 +168,71 @@ class AsyncTeacherLLMServerManager:
             )
         return routing_key
 
+    async def compute_answer_probe_mean_logprob_single(
+        self,
+        sequence_ids: list[int],
+        answer_token_positions: list[int],
+        routing_key: Optional[str] = None,
+    ) -> float:
+        """Score selected answer tokens in one pre-tokenized OA-OPD probe.
+
+        ``sequence_ids`` is already the exact original rollout prefix followed
+        by a separately tokenized complete probe.  ``answer_token_positions``
+        therefore refers directly to this sequence; no text slicing or prefix
+        re-tokenization occurs here.
+        """
+
+        if not sequence_ids:
+            raise ValueError("OA-OPD answer probe sequence must be non-empty.")
+        if not answer_token_positions:
+            raise ValueError("OA-OPD answer probe must select at least one answer token.")
+        positions = [int(position) for position in answer_token_positions]
+        if any(position <= 0 or position >= len(sequence_ids) for position in positions):
+            raise ValueError(
+                "OA-OPD answer-token positions must have a causal predecessor "
+                f"and lie inside the sequence; got {positions} for length {len(sequence_ids)}."
+            )
+
+        teacher_key = self._resolve_teacher_key(routing_key)
+        teacher_model_config = self.teacher_model_configs[teacher_key]
+        client = self.teacher_client[teacher_key]
+        teacher_output = await client.generate(
+            request_id=uuid4().hex,
+            prompt_ids=sequence_ids,
+            sampling_params={
+                "max_tokens": 1,
+                "temperature": teacher_model_config.inference.temperature,
+                # Zero requests only the observed-token log probability.  It
+                # avoids transferring an unused Top-k distribution for every
+                # boundary probe.
+                "prompt_logprobs": 0,
+            },
+        )
+        sampled_ids = torch.tensor(
+            teacher_output.extra_fields["prompt_sampled_ids"], dtype=torch.int64
+        ).reshape(len(sequence_ids), -1)
+        sampled_logprobs = torch.tensor(
+            teacher_output.extra_fields["prompt_sampled_logprobs"],
+            dtype=torch.float32,
+        ).reshape(len(sequence_ids), -1)
+
+        # The server stores the distribution predicting sequence token p in
+        # row p-1, followed by one dummy final row.
+        causal_rows = torch.tensor([position - 1 for position in positions], dtype=torch.long)
+        scored_ids = sampled_ids[causal_rows, 0]
+        expected_ids = torch.tensor(
+            [sequence_ids[position] for position in positions], dtype=scored_ids.dtype
+        )
+        if not torch.equal(scored_ids.cpu(), expected_ids.cpu()):
+            raise RuntimeError(
+                "OA-OPD answer-probe causal alignment failed: returned sampled IDs "
+                "do not equal the selected probe answer IDs."
+            )
+        scores = sampled_logprobs[causal_rows, 0]
+        if not bool(torch.isfinite(scores).all()):
+            raise RuntimeError("OA-OPD answer probe returned a non-finite log probability.")
+        return float(scores.mean().item())
+
     async def compute_teacher_logprobs_single(
         self,
         sequence_ids: list[int],

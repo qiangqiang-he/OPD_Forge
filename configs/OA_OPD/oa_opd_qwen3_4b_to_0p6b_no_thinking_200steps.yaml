@@ -1,0 +1,66 @@
+# OA-OPD: Qwen3-4B Teacher and Qwen3-0.6B Student, both no-thinking.
+
+defaults:
+  - /base
+  - _self_
+
+run_name: oa_opd_qwen3_4b_to_0p6b_no_thinking_200steps
+group_name: OA-OPD
+run_name_prefix: oa_opd_qwen3_4b_to_0p6b_no_thinking_200steps
+student_prompt: qwen3_no_thinking_prompt
+teacher_prompt: qwen3_no_thinking_prompt
+
+data:
+  train_files: [./data/DAPO-17k.json]
+  val_files: [./data/AMC-2023.json, ./data/AIME-2024.json, ./data/AIME-2025.json]
+  max_response_length: 16384
+
+actor_rollout_ref:
+  model: {path: ../FrugalRL/models/Qwen3-0.6B}
+  actor:
+    ppo_max_token_len_per_gpu: 6145
+    optim: {lr: 1.0e-6}
+  rollout:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    n: 1
+    max_model_len: 18432
+    max_num_batched_tokens: 18432
+    log_prob_max_token_len_per_gpu: 6145
+    val_kwargs: {temperature: 0.6, top_p: 0.95, top_k: -1, n: 16}
+  ref: {log_prob_max_token_len_per_gpu: 6145}
+
+algorithm: {name: oa_opd}
+rlvr_generation: {train_max_new_tokens: 4096, val_max_new_tokens: 16384}
+
+distillation:
+  teacher_chunk_size: 128
+  teacher_models:
+    teacher_model:
+      model_path: ../FrugalRL/models/Qwen3-4B
+      inference:
+        response_length: 4096
+        max_model_len: 8192
+        max_num_seqs: 8
+        engine_kwargs:
+          vllm: {max_logprobs: 16}
+  distillation_loss:
+    loss_mode: oa_opd
+    topk: null
+    selection_ratio: 1.0
+    selection_method: random
+    oa_opd_tau: 0.0
+    oa_opd_beta: 1.0
+    oa_opd_probe_batch_size: 8
+    loss_max_clamp: 20.0
+    log_prob_min_clamp: null
+    policy_loss_mode: reinforce
+
+trainer:
+  experiment_name: ${run_name}
+  total_training_steps: 200
+  default_local_dir: ./outputs/${run_name}
+  val_before_train: true
+  test_freq: 20
+  save_freq: 20

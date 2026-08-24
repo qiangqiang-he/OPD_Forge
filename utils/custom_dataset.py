@@ -65,6 +65,10 @@ class CustomDataset(RLHFDataset):
                 # student's rollout (and candidate answer) is available.
                 "ps_question": question,
                 "ps_ground_truth_answer": answer,
+                # OA-OPD inserts this raw dataset value into its answer-probe
+                # template.  Answer normalization/verification belongs to the
+                # dataset and reward layers, not to probe construction.
+                "oa_ground_truth_answer": answer,
                 "data_source": str(example["_data_source"]),
                 "reward_model": {"style": "rule", "ground_truth": answer},
                 "extra_info": {
