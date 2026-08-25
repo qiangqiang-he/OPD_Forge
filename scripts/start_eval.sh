@@ -2,52 +2,53 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: bash scripts/start_eval.sh CONFIG.yaml [Hydra overrides...]" >&2
+  echo "Usage: bash scripts/start_eval.sh configs/eval/CONFIG.yaml [--validate-only]" >&2
   exit 2
 fi
-if ! command -v tmux >/dev/null 2>&1; then
-  echo "tmux is required." >&2
-  exit 1
-fi
-if [[ -z "${CONDA_PREFIX:-}" ]]; then
-  echo "No Conda environment is active. Activate the OPD_Forge environment first." >&2
-  exit 1
-fi
-if ! command -v python >/dev/null 2>&1; then
-  echo "python is not available in the active environment." >&2
-  exit 1
-fi
 
-project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-config_file=$(realpath "$1")
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+project_root=$(cd -- "$script_dir/.." && pwd)
+workspace_root=$(cd -- "$project_root/.." && pwd)
+
+config_argument=$1
 shift
+if [[ "$config_argument" == /* ]]; then
+  config_candidate=$config_argument
+elif [[ -f "$PWD/${config_argument#./}" ]]; then
+  config_candidate=$PWD/${config_argument#./}
+else
+  config_candidate=$project_root/${config_argument#./}
+fi
+if [[ ! -f "$config_candidate" ]]; then
+  echo "Evaluation config does not exist: $config_candidate" >&2
+  exit 2
+fi
+config_file=$(realpath "$config_candidate")
 if [[ ! -f "$config_file" ]]; then
-  echo "Config not found: $config_file" >&2
+  echo "Evaluation config does not exist: $config_file" >&2
   exit 2
 fi
 
-config_dir=$(dirname "$config_file")
-config_name=$(basename "$config_file" .yaml)
-session=${TMUX_SESSION:-eval_$config_name}
-session=${session//./_}
-if tmux has-session -t "$session" 2>/dev/null; then
-  echo "tmux session already exists: $session" >&2
+eval_config_root=$project_root/configs/eval
+case "$config_file" in
+  "$eval_config_root"/*.yaml | "$eval_config_root"/*.yml) ;;
+  *)
+    echo "Evaluation configs must be located directly under $eval_config_root" >&2
+    exit 2
+    ;;
+esac
+
+conda_root=${RLVR_CONDA_ROOT:-$workspace_root/anaconda3}
+if [[ ! -f "$conda_root/etc/profile.d/conda.sh" ]]; then
+  echo "Cannot locate Conda initialization under $conda_root" >&2
   exit 1
 fi
+source "$conda_root/etc/profile.d/conda.sh"
+conda activate "${RLVR_CONDA_ENV:-verl}"
 
-printf -v command 'cd %q && python -m runners.evaluation_entrypoint --config-path %q --config-name %q %q' \
-  "$project_root" "$config_dir" "$config_name" \
-  "hydra.searchpath=[file://$project_root/configs]"
-for override in "$@"; do
-  printf -v command '%s %q' "$command" "$override"
-done
-tmux_env=(-e "PATH=$PATH" -e "CONDA_PREFIX=$CONDA_PREFIX")
-for variable in CONDA_DEFAULT_ENV CONDA_PROMPT_MODIFIER PYTHONPATH LD_LIBRARY_PATH CUDA_VISIBLE_DEVICES WANDB_API_KEY WANDB_ENTITY; do
-  if [[ -n "${!variable:-}" ]]; then
-    tmux_env+=(-e "$variable=${!variable}")
-  fi
-done
-tmux new-session -d -s "$session" "${tmux_env[@]}" "bash -c $(printf '%q' "$command")"
-echo "Evaluation started in tmux session: $session"
-echo "Environment: ${CONDA_DEFAULT_ENV:-$CONDA_PREFIX}"
-echo "Attach with: tmux attach -t $session"
+export PYTHONUNBUFFERED=1
+export TOKENIZERS_PARALLELISM=false
+export PYTHONPATH="$project_root/verl:$project_root${PYTHONPATH:+:$PYTHONPATH}"
+
+cd "$project_root"
+exec python -m utils.evaluate_checkpoints --config "$config_file" "$@"

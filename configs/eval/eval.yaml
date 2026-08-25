@@ -1,0 +1,63 @@
+# Evaluation paths are resolved relative to the OPD_Forge project root.
+
+# Point only to one training output directory. The evaluator will discover all
+# global_step_* children, sort them by numeric step, and temporarily merge the
+# actor FSDP shards under training_output. Each merged model is deleted as soon
+# as that checkpoint finishes evaluation.
+#
+# Derived result identifiers for this example:
+#   run_name = pg_opd_qwen3_4b_instruct_2507_to_4b_no_thinking_100steps
+#   step_num = 20, 40, 60, 80, 100
+training_output: ./outputs/pg_opd_qwen3_4b_instruct_2507_to_4b_no_thinking_100steps
+
+datasets:
+  - name: AMC23
+    path: ./data/AMC-2023.json
+  - name: AIME24
+    path: ./data/AIME-2024.json
+  - name: AIME25
+    path: ./data/AIME-2025.json
+  - name: MATH500
+    path: ./data/MATH500.json
+
+prompt: qwen3_no_thinking_prompt
+seed: 42
+
+sampling:
+  temperature: 0.6
+  top_p: 0.95
+  n: 16
+  max_new_tokens: 32768
+
+# Generate once at sampling.max_new_tokens, then truncate each token sequence
+# to every limit below and re-score it. Values must be unique, ascending, and
+# no greater than sampling.max_new_tokens.
+length_control: [8192, 16384, 20480, 32768]
+
+# For each (run_name, step_num, dataset, length_control) row, emit exactly:
+#   Avg@n           = mean correctness over all n rollouts per question
+#   Pass@n          = fraction of questions with at least one correct rollout
+#   mean_length     = mean response-token count after applying the length limit
+#   truncation_rate = fraction of rollouts cut off by that length limit
+report:
+  metrics: [avg_at_n, pass_at_n, mean_length, truncation_rate]
+
+runtime:
+  # Eight independent single-GPU workers evaluate question shards of one ckpt.
+  # Checkpoints are evaluated sequentially so each ckpt uses all eight GPUs.
+  gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+  tensor_parallel_size: 1
+
+  # Each vLLM generate call contains exactly 256 rollouts per GPU. Therefore,
+  # this value must be divisible by sampling.n (16 => 16 questions per call).
+  rollouts_per_gpu_batch: 256
+
+engine:
+  dtype: bfloat16
+  trust_remote_code: true
+  gpu_memory_utilization: 0.90
+  max_model_len: 34816  # 2048 prompt tokens + 32768 generated tokens
+  enable_prefix_caching: true
+
+# Final JSON: ./eval_results/<run_name>.json
+result_dir: ./eval_results
