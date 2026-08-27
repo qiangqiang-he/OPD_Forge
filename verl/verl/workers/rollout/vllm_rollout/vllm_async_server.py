@@ -126,6 +126,20 @@ class vLLMHttpServer:
         self.model_config = self._init_model_config(model_config)
         self._validate_configs()
 
+        vllm_engine_kwargs = (
+            self.config.get("engine_kwargs", {}).get(
+                self._get_engine_kwargs_key(), {}
+            )
+            or {}
+        )
+        if bool(vllm_engine_kwargs.get("fast_oa_opd_batch_invariant", False)):
+            # The engine core and model worker are spawned after this point and
+            # inherit the flag. vLLM reads it while constructing its kernels.
+            os.environ["VLLM_BATCH_INVARIANT"] = "1"
+            from vllm.model_executor.layers import batch_invariant
+
+            batch_invariant.VLLM_BATCH_INVARIANT = True
+
         self.rollout_mode = rollout_mode
         self.workers = workers
 
@@ -154,6 +168,7 @@ class vLLMHttpServer:
                 logger.warning(f"agent loop only support torch and npu profiler, got {profiler_config.tool}")
                 profiler_config = None
         self.profiler_controller = DistProfiler(self.replica_rank, config=profiler_config, tool_config=tool_config)
+        self._fast_oa_opd_lock = asyncio.Lock()
 
         # used for data parallel: --data-parallel-address, --data-parallel-rpc-port
         if self.node_rank == 0:
@@ -203,6 +218,41 @@ class vLLMHttpServer:
             kwargs=kwargs,
         )
 
+    async def compute_fast_oa_opd_probe_logprobs(
+        self,
+        *,
+        sequence_ids: list[int],
+        position_ids: list[int],
+        original_sequence_length: int,
+        branches: list[dict[str, Any]],
+    ) -> list[float]:
+        """Execute one branch-masked OA-OPD forward on the loaded Teacher."""
+
+        if len(sequence_ids) > int(self.config.max_model_len):
+            raise ValueError(
+                "Fast OA-OPD packed probe exceeds the Teacher context limit: "
+                f"{len(sequence_ids)} > {self.config.max_model_len}."
+            )
+        # A worker collective RPC runs outside vLLM's ordinary request
+        # scheduler. Serialize these forwards per replica while the global
+        # Teacher load balancer continues distributing rollouts across replicas.
+        async with self._fast_oa_opd_lock:
+            worker_results = await self.engine.collective_rpc(
+                method="compute_fast_oa_opd_probe_logprobs",
+                kwargs={
+                    "sequence_ids": sequence_ids,
+                    "position_ids": position_ids,
+                    "original_sequence_length": int(original_sequence_length),
+                    "branches": branches,
+                },
+            )
+        if len(worker_results) != 1:
+            raise RuntimeError(
+                "Fast OA-OPD expected exactly one TP/PP worker result, got "
+                f"{len(worker_results)}."
+            )
+        return [float(value) for value in worker_results[0]]
+
     async def launch_server(self, master_address: str = None, master_port: int = None, dp_rpc_port: int = None):
         if self.node_rank != 0:
             assert master_address and master_port and dp_rpc_port, (
@@ -215,6 +265,7 @@ class vLLMHttpServer:
         # 1. setup vllm serve cli args
         engine_kwargs = self.config.get("engine_kwargs", {}).get(self._get_engine_kwargs_key(), {}) or {}
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        engine_kwargs.pop("fast_oa_opd_batch_invariant", None)
         self._eopd_entropy_topk = engine_kwargs.pop(
             "full_vocab_entropy_topk", None
         )

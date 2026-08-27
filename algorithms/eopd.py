@@ -10,6 +10,7 @@ from utils.opd_runtime import BaseOPDTrainer, validate_opd_runtime_config
 EOPD_VARIANT = "eopd"
 EOPD_LOSS_MODE = "eopd"
 EOPD_WANDB_GROUP = "EOPD"
+EOPD_PUBLICATION_WANDB_GROUP = "PUB_EOPD_Thinking"
 
 
 def validate_eopd_config(config) -> None:
@@ -24,10 +25,13 @@ def validate_eopd_config(config) -> None:
         raise ValueError(f"EOPD requires loss_mode={EOPD_LOSS_MODE}.")
     if str(loss.policy_loss_mode) != "reinforce":
         raise ValueError("EOPD requires policy_loss_mode=reinforce for standard OPD.")
-    if str(config.get("group_name", "")) != EOPD_WANDB_GROUP:
+    group_name = str(config.get("group_name", ""))
+    if group_name not in {EOPD_WANDB_GROUP, EOPD_PUBLICATION_WANDB_GROUP}:
         raise ValueError(
-            f"EOPD requires group_name={EOPD_WANDB_GROUP!r} so W&B runs stay "
-            "separate from other OPD variants."
+            "EOPD requires group_name to identify either its exploratory or "
+            "publication experiment family; got "
+            f"{group_name!r}, expected one of "
+            f"{EOPD_WANDB_GROUP!r}, {EOPD_PUBLICATION_WANDB_GROUP!r}."
         )
     if int(loss.topk) <= 0:
         raise ValueError(f"EOPD topk must be positive, got {loss.topk}.")

@@ -162,6 +162,238 @@ def enable_eopd_entropy_gather(sampler, topk: int) -> None:
     sampler._verl_eopd_entropy_topk = topk
 
 
+def _validate_fast_oa_opd_worker_payload(
+    *,
+    sequence_ids: list[int],
+    position_ids: list[int],
+    original_sequence_length: int,
+    branches: list[dict[str, Any]],
+) -> None:
+    """Validate primitive Fast OA-OPD layout data inside the vLLM worker."""
+
+    sequence_length = len(sequence_ids)
+    if sequence_length != len(position_ids):
+        raise ValueError("Fast OA-OPD sequence IDs and position IDs must align.")
+    if not 1 <= int(original_sequence_length) <= sequence_length:
+        raise ValueError("Fast OA-OPD original sequence length is invalid.")
+    if [int(value) for value in position_ids[:original_sequence_length]] != list(
+        range(original_sequence_length)
+    ):
+        raise ValueError("Fast OA-OPD changed original rollout position IDs.")
+    if not branches:
+        raise ValueError("Fast OA-OPD requires at least one appended probe branch.")
+
+    previous_end = int(original_sequence_length)
+    for expected_index, branch in enumerate(branches):
+        index = int(branch["index"])
+        visible_end = int(branch["visible_prefix_end"])
+        probe_start = int(branch["probe_start"])
+        probe_end = int(branch["probe_end"])
+        answer_positions = [int(value) for value in branch["answer_token_positions"]]
+        if index != expected_index:
+            raise ValueError("Fast OA-OPD branch indices must be consecutive.")
+        if probe_start != previous_end:
+            raise ValueError("Fast OA-OPD probe branches must be contiguous.")
+        if not (
+            1
+            <= visible_end
+            <= original_sequence_length
+            <= probe_start
+            < probe_end
+            <= sequence_length
+        ):
+            raise ValueError(f"Invalid Fast OA-OPD branch {index}.")
+        expected_positions = list(
+            range(visible_end, visible_end + probe_end - probe_start)
+        )
+        if [int(value) for value in position_ids[probe_start:probe_end]] != expected_positions:
+            raise ValueError(
+                f"Fast OA-OPD branch {index} has incorrect logical position IDs."
+            )
+        if not answer_positions or any(
+            value <= probe_start or value >= probe_end for value in answer_positions
+        ):
+            raise ValueError(
+                f"Fast OA-OPD branch {index} has invalid answer-token positions."
+            )
+        previous_end = probe_end
+    if previous_end != sequence_length:
+        raise ValueError("Fast OA-OPD packed sequence has unassigned trailing tokens.")
+
+
+def _fast_oa_opd_flash_attention(
+    *,
+    self_attn,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    original_sequence_length: int,
+    branches: list[dict[str, Any]],
+) -> torch.Tensor:
+    """Evaluate the branch mask with vLLM's own ragged FlashAttention.
+
+    Query rows remain in their physical packed order.  The KV view contains
+    one ordinary causal rollout plus one logical ``[visible prefix, probe]``
+    sequence per branch.  FlashAttention's bottom-right causal alignment then
+    gives every probe exactly its allowed original prefix and its own causal
+    probe prefix, without materializing a dense quadratic mask.
+    """
+
+    from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
+
+    impl = getattr(self_attn.attn, "impl", None)
+    if impl is None or type(impl).__name__ != "FlashAttentionImpl":
+        raise NotImplementedError(
+            "Fast OA-OPD requires the vLLM FlashAttention Teacher backend, "
+            f"got {type(impl).__module__}.{type(impl).__name__}."
+        )
+    if impl.vllm_flash_attn_version is None:
+        raise RuntimeError("Fast OA-OPD could not resolve a FlashAttention version.")
+    if not bool(impl.batch_invariant_enabled):
+        raise RuntimeError(
+            "Fast OA-OPD requires vLLM batch-invariant kernels for strict "
+            "independent-probe equivalence."
+        )
+
+    query_lengths = [int(original_sequence_length)]
+    key_lengths = [int(original_sequence_length)]
+    key_parts = [key[:original_sequence_length]]
+    value_parts = [value[:original_sequence_length]]
+    for branch in branches:
+        visible_end = int(branch["visible_prefix_end"])
+        probe_start = int(branch["probe_start"])
+        probe_end = int(branch["probe_end"])
+        probe_length = probe_end - probe_start
+        query_lengths.append(probe_length)
+        key_lengths.append(visible_end + probe_length)
+        key_parts.extend((key[:visible_end], key[probe_start:probe_end]))
+        value_parts.extend((value[:visible_end], value[probe_start:probe_end]))
+
+    if sum(query_lengths) != query.shape[0]:
+        raise RuntimeError("Fast OA-OPD query rows do not cover the packed sequence.")
+
+    def cumulative_lengths(lengths: list[int]) -> torch.Tensor:
+        values = [0]
+        for length in lengths:
+            values.append(values[-1] + length)
+        return torch.tensor(values, dtype=torch.int32, device=query.device)
+
+    packed_key = torch.cat(key_parts, dim=0).contiguous()
+    packed_value = torch.cat(value_parts, dim=0).contiguous()
+    descale_shape = (len(query_lengths), self_attn.num_kv_heads)
+    output = flash_attn_varlen_func(
+        q=query.contiguous(),
+        k=packed_key,
+        v=packed_value,
+        cu_seqlens_q=cumulative_lengths(query_lengths),
+        cu_seqlens_k=cumulative_lengths(key_lengths),
+        max_seqlen_q=max(query_lengths),
+        max_seqlen_k=max(key_lengths),
+        softmax_scale=float(self_attn.scaling),
+        causal=True,
+        window_size=list(impl.sliding_window),
+        softcap=float(impl.logits_soft_cap),
+        alibi_slopes=impl.alibi_slopes,
+        fa_version=int(impl.vllm_flash_attn_version),
+        q_descale=self_attn.attn._q_scale.expand(descale_shape),
+        k_descale=self_attn.attn._k_scale.expand(descale_shape),
+        v_descale=self_attn.attn._v_scale.expand(descale_shape),
+        num_splits=1 if impl.batch_invariant_enabled else 0,
+        s_aux=impl.sinks,
+    )
+    return output
+
+
+def _fast_oa_opd_qwen3_forward(
+    *,
+    model,
+    input_ids: torch.Tensor,
+    position_ids: torch.Tensor,
+    original_sequence_length: int,
+    branches: list[dict[str, Any]],
+) -> torch.Tensor:
+    """Run Qwen3 using its loaded vLLM weights and a branch-causal mask.
+
+    vLLM's ordinary decoder attention obtains its causal structure from the
+    scheduler and paged-KV metadata.  Fast OA-OPD needs a branch-causal mask,
+    represented here as one ragged causal rollout plus independent ragged probe
+    branches.  Embeddings, projections, Q/K norms, RoPE, attention, MLPs and
+    RMS norms all reuse the already-loaded vLLM implementation and weights.
+    """
+
+    decoder = getattr(model, "model", None)
+    if decoder is None or type(decoder).__name__ != "Qwen3Model":
+        raise NotImplementedError(
+            "Fast OA-OPD masked forward currently supports vLLM Qwen3ForCausalLM, "
+            f"got {type(model).__module__}.{type(model).__name__}."
+        )
+    if not hasattr(decoder, "layers"):
+        raise RuntimeError("Fast OA-OPD cannot locate the vLLM Qwen3 decoder layers.")
+
+    hidden_states = decoder.embed_input_ids(input_ids)
+    residual = None
+    sequence_length = input_ids.numel()
+
+    for layer in decoder.layers:
+        if residual is None:
+            residual = hidden_states
+            hidden_states = layer.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = layer.input_layernorm(
+                hidden_states, residual
+            )
+
+        self_attn = layer.self_attn
+        qkv, _ = self_attn.qkv_proj(hidden_states)
+        query, key, value = qkv.split(
+            [self_attn.q_size, self_attn.kv_size, self_attn.kv_size], dim=-1
+        )
+        query = self_attn.q_norm(
+            query.view(
+                sequence_length,
+                self_attn.num_heads,
+                self_attn.head_dim,
+            )
+        ).view(sequence_length, self_attn.q_size)
+        key = self_attn.k_norm(
+            key.view(
+                sequence_length,
+                self_attn.num_kv_heads,
+                self_attn.head_dim,
+            )
+        ).view(sequence_length, self_attn.kv_size)
+        query, key = self_attn.rotary_emb(position_ids, query, key)
+
+        query = query.view(
+            sequence_length, self_attn.num_heads, self_attn.head_dim
+        )
+        key = key.view(
+            sequence_length, self_attn.num_kv_heads, self_attn.head_dim
+        )
+        value = value.view(
+            sequence_length, self_attn.num_kv_heads, self_attn.head_dim
+        )
+        attention_output = _fast_oa_opd_flash_attention(
+            self_attn=self_attn,
+            query=query,
+            key=key,
+            value=value,
+            original_sequence_length=int(original_sequence_length),
+            branches=branches,
+        )
+        attention_output = attention_output.view(
+            sequence_length, self_attn.q_size
+        )
+        hidden_states, _ = self_attn.o_proj(attention_output)
+        hidden_states, residual = layer.post_attention_layernorm(
+            hidden_states, residual
+        )
+        hidden_states = layer.mlp(hidden_states)
+
+    hidden_states, _ = decoder.norm(hidden_states, residual)
+    return hidden_states
+
+
 class vLLMColocateWorkerExtension:
     """
     The class for vLLM's worker to inherit from, in the colocate setting.
@@ -257,6 +489,78 @@ class vLLMColocateWorkerExtension:
         """Enable bounded exact-entropy prompt-logprob output on this worker."""
 
         enable_eopd_entropy_gather(self.model_runner.sampler, topk)
+
+    def compute_fast_oa_opd_probe_logprobs(
+        self,
+        *,
+        sequence_ids: list[int],
+        position_ids: list[int],
+        original_sequence_length: int,
+        branches: list[dict[str, Any]],
+    ) -> list[float]:
+        """Score all appended OA-OPD branches in one masked Qwen3 forward."""
+
+        _validate_fast_oa_opd_worker_payload(
+            sequence_ids=sequence_ids,
+            position_ids=position_ids,
+            original_sequence_length=int(original_sequence_length),
+            branches=branches,
+        )
+        parallel_config = self.model_runner.vllm_config.parallel_config
+        if (
+            int(parallel_config.tensor_parallel_size) != 1
+            or int(parallel_config.pipeline_parallel_size) != 1
+        ):
+            raise NotImplementedError(
+                "Fast OA-OPD masked probes currently require Teacher TP=1 and PP=1."
+            )
+
+        device = self.device
+        input_ids = torch.tensor(sequence_ids, dtype=torch.long, device=device)
+        positions = torch.tensor(position_ids, dtype=torch.long, device=device)
+        predictor_rows: list[int] = []
+        target_ids: list[int] = []
+        branch_widths: list[int] = []
+        for branch in branches:
+            answer_positions = [
+                int(value) for value in branch["answer_token_positions"]
+            ]
+            branch_widths.append(len(answer_positions))
+            predictor_rows.extend(position - 1 for position in answer_positions)
+            target_ids.extend(int(sequence_ids[position]) for position in answer_positions)
+
+        with torch.inference_mode():
+            hidden_states = _fast_oa_opd_qwen3_forward(
+                model=self.model_runner.model,
+                input_ids=input_ids,
+                position_ids=positions,
+                original_sequence_length=int(original_sequence_length),
+                branches=branches,
+            )
+            row_indices = torch.tensor(
+                predictor_rows, dtype=torch.long, device=device
+            )
+            selected_hidden = hidden_states.index_select(0, row_indices)
+            logits = self.model_runner.model.compute_logits(selected_hidden)
+            if logits is None:
+                raise RuntimeError("Fast OA-OPD Teacher produced no logits.")
+            targets = torch.tensor(target_ids, dtype=torch.long, device=device)
+            token_logprobs = torch.log_softmax(logits.float(), dim=-1).gather(
+                dim=-1, index=targets.unsqueeze(-1)
+            ).squeeze(-1)
+            if not bool(torch.isfinite(token_logprobs).all()):
+                raise RuntimeError(
+                    "Fast OA-OPD Teacher returned non-finite answer log probabilities."
+                )
+
+            values: list[float] = []
+            offset = 0
+            for width in branch_widths:
+                values.append(
+                    float(token_logprobs[offset : offset + width].mean().item())
+                )
+                offset += width
+        return values
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""

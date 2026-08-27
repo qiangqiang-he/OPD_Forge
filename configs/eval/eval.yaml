@@ -17,6 +17,10 @@ datasets:
     path: ./data/AIME-2024.json
   - name: AIME25
     path: ./data/AIME-2025.json
+  - name: AIME26
+    path: ./data/AIME-2026.json
+  - name: HMMT-2026
+    path: ./data/HMMT-FEB-2026.json
   - name: MATH500
     path: ./data/MATH500.json
 

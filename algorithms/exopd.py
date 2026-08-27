@@ -22,6 +22,7 @@ EXOPD_VARIANT = "exopd"
 EXOPD_LOSS_MODE = "exopd_reverse_kl"
 EXOPD_DEFAULT_LAMBDA = 1.25
 EXOPD_WANDB_GROUP = "ExOPD"
+EXOPD_PUBLICATION_WANDB_GROUP = "PUB_ExOPD_Thinking"
 
 
 def _model_lora_rank(model) -> int:
@@ -58,10 +59,13 @@ def validate_exopd_config(config) -> None:
             f"{exopd_lambda}."
         )
 
-    if str(config.get("group_name", "")) != EXOPD_WANDB_GROUP:
+    group_name = str(config.get("group_name", ""))
+    if group_name not in {EXOPD_WANDB_GROUP, EXOPD_PUBLICATION_WANDB_GROUP}:
         raise ValueError(
-            f"ExOPD requires group_name={EXOPD_WANDB_GROUP!r} so its W&B runs "
-            "remain separate from other OPD variants."
+            "ExOPD requires group_name to identify either its exploratory or "
+            "publication experiment family; got "
+            f"{group_name!r}, expected one of "
+            f"{EXOPD_WANDB_GROUP!r}, {EXOPD_PUBLICATION_WANDB_GROUP!r}."
         )
     if bool(config.algorithm.get("use_kl_in_reward", False)):
         raise ValueError("ExOPD uses its reference only in A_ExOPD; disable KL reward.")

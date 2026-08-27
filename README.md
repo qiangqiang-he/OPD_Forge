@@ -68,6 +68,30 @@ RUN_NAME=my_run GROUP_NAME=my_group \
 
 正式运行前请确认配置中的模型、训练集和评估集路径在当前机器上可访问。同一组 GPU 上不要同时启动多个训练。
 
+## 评测训练 checkpoints
+
+评测配置统一放在 `configs/eval/`。启动命令只需要脚本和配置路径；脚本会激活
+同一工作区中的 `verl` Conda 环境：
+
+```bash
+bash scripts/start_eval.sh configs/eval/eval.yaml
+```
+
+配置中的 `training_output` 指向一个训练输出目录。评测器会按 step 数值顺序
+发现其中全部 `global_step_*`，将各 checkpoint 的 actor FSDP 分片临时合并到该
+`training_output` 内，并用 8 个单卡 vLLM worker 逐 checkpoint 评测。每个
+checkpoint 结束后（包括异常退出）都会删除对应的临时合并目录；
+`eval_results/` 只保存最终的 `<run_name>.json`。
+
+正式占用 GPU 前可执行完整的 CPU 预检：
+
+```bash
+bash scripts/start_eval.sh configs/eval/eval.yaml --validate-only
+```
+
+预检只读取 YAML、数据集、tokenizer 与 checkpoint 元数据，不合并模型，也不启动
+vLLM 或 GPU worker。
+
 ## 八卡 smoke
 
 下面的脚本依次运行 thinking GKD-OPD 和 no-thinking PG-OPD，各训练 2 steps，

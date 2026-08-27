@@ -27,6 +27,40 @@ You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
 """
 
 
+qwen3_thinking_with_answer_prompt = r"""<|im_start|>system
+You are a helpful math assistant.
+Please solve the math problem step by step clearly and concisely.
+
+A verified ground-truth answer is provided to help you solve the problem correctly:
+Ground-truth answer: {ground_answer}
+
+Use the ground-truth answer as a reliable reference, but still work through the problem carefully and provide a complete and logically coherent solution.
+You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
+<|im_start|>user
+{question}<|im_end|>
+<|im_start|>assistant
+"""
+
+
+qwen3_no_thinking_with_answer_prompt = r"""<|im_start|>system
+You are a helpful math assistant.
+Please solve the math problem step by step clearly and concisely.
+
+A verified ground-truth answer is provided to help you solve the problem correctly:
+Ground-truth answer: {ground_answer}
+
+Use the ground-truth answer as a reliable reference, but still provide a complete and logically coherent solution.
+You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
+<|im_start|>user
+{question}<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+"""
+
+
 qwen3_positive_privileged_feedback_thinking = r"""<|im_start|>system
 You are a helpful math assistant.
 Please solve the math problem step by step clearly and concisely.
@@ -126,11 +160,19 @@ With this highly negative feedback in mind, solve the problem step by step and a
 PROMPT_TEMPLATES = {
     "qwen3_thinking_prompt": qwen3_thinking_prompt,
     "qwen3_no_thinking_prompt": qwen3_no_thinking_prompt,
+    "qwen3_thinking_with_answer_prompt": qwen3_thinking_with_answer_prompt,
+    "qwen3_no_thinking_with_answer_prompt": qwen3_no_thinking_with_answer_prompt,
     "qwen3_positive_privileged_feedback_thinking": qwen3_positive_privileged_feedback_thinking,
     "qwen3_positive_privileged_feedback_no_thinking": qwen3_positive_privileged_feedback_no_thinking,
     "qwen3_negative_privileged_feedback_thinking": qwen3_negative_privileged_feedback_thinking,
     "qwen3_negative_privileged_feedback_no_thinking": qwen3_negative_privileged_feedback_no_thinking,
     "qwen3_incorrect_feedback_v2": qwen3_incorrect_feedback_v2,
+}
+
+
+PRI_PRIVILEGED_PROMPTS = {
+    "qwen3_thinking_prompt": "qwen3_thinking_with_answer_prompt",
+    "qwen3_no_thinking_prompt": "qwen3_no_thinking_with_answer_prompt",
 }
 
 
@@ -168,6 +210,31 @@ def get_cal_privileged_feedback_prompt_names(teacher_prompt_name: str) -> tuple[
         ) from exc
 
 
-def render_prompt(name: str, *, question: str, answer: str = "") -> str:
+def get_pri_privileged_prompt_name(student_prompt_name: str) -> str:
+    """Return the mode-matched answer-privileged Teacher prompt name."""
+
+    try:
+        return PRI_PRIVILEGED_PROMPTS[student_prompt_name]
+    except KeyError as exc:
+        supported = ", ".join(sorted(PRI_PRIVILEGED_PROMPTS))
+        raise ValueError(
+            "Pri-OPD requires a supported Student thinking-mode prompt; "
+            f"got {student_prompt_name!r}, expected one of: {supported}."
+        ) from exc
+
+
+def render_prompt(
+    name: str,
+    *,
+    question: str,
+    answer: str = "",
+    ground_answer: str | None = None,
+) -> str:
     """Render a registered prompt without applying another chat template."""
-    return get_prompt_template(name).format(question=question, answer=answer)
+    if ground_answer is None:
+        ground_answer = answer
+    return get_prompt_template(name).format(
+        question=question,
+        answer=answer,
+        ground_answer=ground_answer,
+    )

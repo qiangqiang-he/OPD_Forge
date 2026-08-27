@@ -25,6 +25,9 @@ ALGORITHM_REGISTRY: dict[str, AlgorithmRegistration] = {
     "pg_opd": AlgorithmRegistration(
         "algorithms.pg_opd", "PGOPDTrainer", "validate_pg_opd_config"
     ),
+    "pri_opd": AlgorithmRegistration(
+        "algorithms.pri_opd", "PriOPDTrainer", "validate_pri_opd_config"
+    ),
     "gkd_opd": AlgorithmRegistration(
         "algorithms.gkd_opd", "GKDOPDTrainer", "validate_gkd_opd_config"
     ),
@@ -48,6 +51,11 @@ ALGORITHM_REGISTRY: dict[str, AlgorithmRegistration] = {
     ),
     "oa_opd": AlgorithmRegistration(
         "algorithms.oa_opd", "OAOPDTrainer", "validate_oa_opd_config"
+    ),
+    "fast_oa_opd": AlgorithmRegistration(
+        "algorithms.fast_oa_opd",
+        "FastOAOPDTrainer",
+        "validate_fast_oa_opd_config",
     ),
 }
 

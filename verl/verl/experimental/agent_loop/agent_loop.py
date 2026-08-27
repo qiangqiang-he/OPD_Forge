@@ -1162,7 +1162,8 @@ class AgentLoopWorker:
             is_ps_opd = algorithm_name == "ps_opd"
             is_cal_opd = algorithm_name == "cal_opd"
             is_oa_opd = algorithm_name == "oa_opd"
-            if is_oa_opd:
+            is_fast_oa_opd = algorithm_name == "fast_oa_opd"
+            if is_oa_opd or is_fast_oa_opd:
                 if sample_kwargs is None:
                     raise RuntimeError("OA-OPD requires rollout answer metadata.")
 
@@ -1179,21 +1180,39 @@ class AgentLoopWorker:
                     )
                 loss_config = self.config.distillation.distillation_loss
                 try:
-                    from utils.oa_opd import compute_oa_opd_for_rollout
+                    if is_fast_oa_opd:
+                        from utils.fast_oa_opd import (
+                            compute_fast_oa_opd_for_rollout,
+                        )
 
-                    oa_result = await compute_oa_opd_for_rollout(
-                        tokenizer=self.tokenizer,
-                        teacher_probe=(
-                            self.teacher_server_manager.compute_answer_probe_mean_logprob_single
-                        ),
-                        prompt_ids=prompt_ids,
-                        response_ids=response_ids,
-                        answer=answer,
-                        tau=float(loss_config.oa_opd_tau),
-                        beta=float(loss_config.oa_opd_beta),
-                        probe_batch_size=int(loss_config.oa_opd_probe_batch_size),
-                        routing_key=routing_key,
-                    )
+                        oa_result = await compute_fast_oa_opd_for_rollout(
+                            tokenizer=self.tokenizer,
+                            teacher_masked_probe=(
+                                self.teacher_server_manager.compute_masked_answer_probe_mean_logprobs_single
+                            ),
+                            prompt_ids=prompt_ids,
+                            response_ids=response_ids,
+                            answer=answer,
+                            tau=float(loss_config.oa_opd_tau),
+                            beta=float(loss_config.oa_opd_beta),
+                            routing_key=routing_key,
+                        )
+                    else:
+                        from utils.oa_opd import compute_oa_opd_for_rollout
+
+                        oa_result = await compute_oa_opd_for_rollout(
+                            tokenizer=self.tokenizer,
+                            teacher_probe=(
+                                self.teacher_server_manager.compute_answer_probe_mean_logprob_single
+                            ),
+                            prompt_ids=prompt_ids,
+                            response_ids=response_ids,
+                            answer=answer,
+                            tau=float(loss_config.oa_opd_tau),
+                            beta=float(loss_config.oa_opd_beta),
+                            probe_batch_size=int(loss_config.oa_opd_probe_batch_size),
+                            routing_key=routing_key,
+                        )
                     output.extra_fields["oa_opd_weights"] = oa_result.token_weights
                     output.extra_fields["oa_opd_num_steps"] = float(oa_result.num_steps)
                     output.extra_fields["oa_opd_active_steps"] = float(
@@ -1206,7 +1225,11 @@ class AgentLoopWorker:
                     # Outcome probing is an intervention gate.  A failed gate
                     # must never silently fall back to full standard OPD;
                     # conservatively disable intervention for this rollout.
-                    logger.warning("OA-OPD probe failed; using zero weights: %s", exc)
+                    logger.warning(
+                        "%s probe failed; using zero weights: %s",
+                        "Fast OA-OPD" if is_fast_oa_opd else "OA-OPD",
+                        exc,
+                    )
                     output.extra_fields["oa_opd_weights"] = [0.0] * len(response_ids)
                     output.extra_fields["oa_opd_num_steps"] = 0.0
                     output.extra_fields["oa_opd_active_steps"] = 0.0

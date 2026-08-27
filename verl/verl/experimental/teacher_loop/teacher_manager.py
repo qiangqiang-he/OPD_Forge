@@ -233,6 +233,45 @@ class AsyncTeacherLLMServerManager:
             raise RuntimeError("OA-OPD answer probe returned a non-finite log probability.")
         return float(scores.mean().item())
 
+    async def compute_masked_answer_probe_mean_logprobs_single(
+        self,
+        *,
+        sequence_ids: list[int],
+        position_ids: list[int],
+        original_sequence_length: int,
+        branches: list[dict[str, Any]],
+        routing_key: Optional[str] = None,
+    ) -> list[float]:
+        """Score every appended Fast OA-OPD probe in one masked forward."""
+
+        if not sequence_ids or len(sequence_ids) != len(position_ids):
+            raise ValueError(
+                "Fast OA-OPD requires aligned, non-empty sequence and position IDs."
+            )
+        if not branches:
+            raise ValueError("Fast OA-OPD requires at least one probe branch.")
+        teacher_key = self._resolve_teacher_key(routing_key)
+        teacher_model_config = self.teacher_model_configs[teacher_key]
+        if str(teacher_model_config.inference.name) != "vllm":
+            raise ValueError("Fast OA-OPD masked probes require the vLLM Teacher backend.")
+        client = self.teacher_client[teacher_key]
+        values = await client.compute_fast_oa_opd_probe_logprobs(
+            request_id=uuid4().hex,
+            sequence_ids=[int(value) for value in sequence_ids],
+            position_ids=[int(value) for value in position_ids],
+            original_sequence_length=int(original_sequence_length),
+            branches=branches,
+        )
+        if len(values) != len(branches):
+            raise RuntimeError(
+                "Fast OA-OPD Teacher returned a boundary-value count mismatch: "
+                f"{len(values)} != {len(branches)}."
+            )
+        value_tensor = torch.tensor(values, dtype=torch.float64)
+        if not bool(torch.isfinite(value_tensor).all()):
+            raise RuntimeError("Fast OA-OPD Teacher returned a non-finite boundary value.")
+        return [float(value) for value in values]
+
     async def compute_teacher_logprobs_single(
         self,
         sequence_ids: list[int],

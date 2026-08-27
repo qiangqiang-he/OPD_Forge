@@ -219,6 +219,28 @@ class LLMServerClient:
         finally:
             self._release_server(server_id)
 
+    async def compute_fast_oa_opd_probe_logprobs(
+        self,
+        request_id: str,
+        *,
+        sequence_ids: list[int],
+        position_ids: list[int],
+        original_sequence_length: int,
+        branches: list[dict[str, Any]],
+    ) -> list[float]:
+        """Route one Fast OA-OPD masked forward to a Teacher replica."""
+
+        server_id, server = await self._acquire_server(request_id)
+        try:
+            return await server.compute_fast_oa_opd_probe_logprobs.remote(
+                sequence_ids=sequence_ids,
+                position_ids=position_ids,
+                original_sequence_length=int(original_sequence_length),
+                branches=branches,
+            )
+        finally:
+            self._release_server(server_id)
+
 
 class LLMServerManager:
     """LLMServerManager is responsible for:

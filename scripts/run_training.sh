@@ -78,8 +78,19 @@ while [[ $# -gt 0 ]]; do
 done
 
 export WANDB_MODE=${WANDB_MODE:-online}
-: "${WANDB_API_KEY:?WANDB_API_KEY must be set before starting training.}"
-export WANDB_API_KEY
+if [[ "$WANDB_MODE" != "offline" && -z "${WANDB_API_KEY:-}" ]]; then
+  wandb_netrc=${NETRC:-${HOME:?HOME must be set to locate W&B credentials}/.netrc}
+  if [[ ! -r "$wandb_netrc" ]] || ! awk '
+    $1 == "machine" && $2 == "api.wandb.ai" { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$wandb_netrc"; then
+    echo "W&B online mode requires WANDB_API_KEY or an api.wandb.ai entry in ~/.netrc." >&2
+    exit 1
+  fi
+fi
+if [[ -n "${WANDB_API_KEY:-}" ]]; then
+  export WANDB_API_KEY
+fi
 export WANDB_INIT_TIMEOUT=${WANDB_INIT_TIMEOUT:-600}
 
 # Training is detached by default so it survives SSH and terminal disconnects.
@@ -96,7 +107,7 @@ if [[ -z "${TMUX:-}" ]]; then
   tmux_env=(env)
   # tmux servers retain the environment from server creation time, so values
   # supplied only to this launcher invocation must be forwarded explicitly.
-  for var_name in RUN_NAME RUN_PREFIX GROUP_NAME WANDB_MODE WANDB_API_KEY WANDB_RESUME RLVR_WORKSPACE_ROOT RLVR_CONDA_ROOT RLVR_CONDA_ENV; do
+  for var_name in RUN_NAME RUN_PREFIX GROUP_NAME WANDB_MODE WANDB_API_KEY WANDB_ENTITY WANDB_RESUME RLVR_WORKSPACE_ROOT RLVR_CONDA_ROOT RLVR_CONDA_ENV; do
     [[ -n "${!var_name:-}" ]] && tmux_env+=("$var_name=${!var_name}")
   done
   printf -v tmux_command '%q ' "${tmux_env[@]}" bash "$project_root/scripts/run_training.sh" "${launch_args[@]}"

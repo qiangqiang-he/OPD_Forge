@@ -1,5 +1,6 @@
 # Training outputs and experiment tracking
 outputs/
+eval_results/
 wandb/
 ray_results/
 multirun/
@@ -16,6 +17,11 @@ tests/
 # Local smoke and temporary experiment configurations
 configs/temp/
 
+# Local analysis scripts and results
+analyze/
+utils/busy_gpus.py
+utils/hold_gpus.py
+
 # Local environments, credentials, and private keys
 .env
 .env.*
@@ -26,6 +32,7 @@ venv/
 *.key
 
 # Model weights and checkpoints
+models/
 *.ckpt
 *.pt
 *.pth

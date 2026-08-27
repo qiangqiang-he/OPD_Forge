@@ -29,6 +29,7 @@ from verl.workers.utils.padding import no_padding_2_padding, response_to_nested
 UNI_OPD_VARIANT = "uni_opd"
 UNI_OPD_LOSS_MODE = "uni_opd"
 UNI_OPD_WANDB_GROUP = "UniOPD"
+UNI_OPD_PUBLICATION_WANDB_GROUP = "PUB_Uni_OPD_Thinking"
 UNI_OPD_ROLLOUTS_PER_PROMPT = 16
 UNI_OPD_TARGET_CORRECT_RATIO = 0.5
 UNI_OPD_DEFAULT_MARGIN = 0.4
@@ -371,9 +372,13 @@ def validate_uni_opd_config(config) -> None:
         raise ValueError(
             f"Uni-OPD requires algorithm.name={UNI_OPD_VARIANT}."
         )
-    if str(config.get("group_name", "")) != UNI_OPD_WANDB_GROUP:
+    group_name = str(config.get("group_name", ""))
+    if group_name not in {UNI_OPD_WANDB_GROUP, UNI_OPD_PUBLICATION_WANDB_GROUP}:
         raise ValueError(
-            f"Uni-OPD requires group_name={UNI_OPD_WANDB_GROUP!r}."
+            "Uni-OPD requires group_name to identify either its exploratory or "
+            "publication experiment family; got "
+            f"{group_name!r}, expected one of "
+            f"{UNI_OPD_WANDB_GROUP!r}, {UNI_OPD_PUBLICATION_WANDB_GROUP!r}."
         )
 
     loss = config.distillation.distillation_loss

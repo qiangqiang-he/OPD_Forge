@@ -1,0 +1,214 @@
+[
+    {
+        "question": "At Stanford, happiness is measured in Stanjoys. While working on math homework without interruption, Lockensy earns Stanjoys at a continuous rate of $\\frac{t^{2}}{7}$ Stanjoys per minute, where $t$ is the number of minutes since she last resumed uninterrupted homework. While not doing her math homework, she earns Stanjoys at a constant rate of $1$ per minute. During a 1-hour homework session, Lockensy takes an 18-minute phone call from her friend Chillsea. Given that Chillsea times her call to minimize Lockensy's total Stanjoys, compute the amount of Stanjoys that Lockensy will accumulate by the end of the hour session.",
+        "answer": "900"
+    },
+    {
+        "question": "Let $f(x)=e^{\\cos ^{2}(x)}$ and $g(x)=e^{\\sin ^{2}(x)}$. Compute\n\n$$\n\\int_{0}^{\\pi} f^{\\prime}(x) g^{\\prime}(x) \\mathrm{d} x\n$$",
+        "answer": "-\\frac{\\pi e}{2}"
+    },
+    {
+        "question": "Given real constants $a, b, c$, define the cubic polynomials\n\n$$\n\\begin{aligned}\n& A(x)=a x^{3}+a b x^{2}-4 x-c \\\\\n& B(x)=b x^{3}+b c x^{2}-6 x-a \\\\\n& C(x)=c x^{3}+c a x^{2}-9 x-b\n\\end{aligned}\n$$\n\nGiven that $A, B$, and $C$ have local extrema at $b, c$, and $a$, respectively, compute $a b c$. (A local extremum is either a local maximum or a local minimum.)",
+        "answer": "\\frac{6}{5}"
+    },
+    {
+        "question": "Let $f$ be a continuous function satisfying $f\\left(x^{7}+6 x^{5}+3 x^{3}+1\\right)=9 x+5$ for all reals $x$. Compute the integral\n\n$$\n\\int_{-9}^{11} f(x) \\mathrm{d} x .\n$$\n",
+        "answer": "100"
+    },
+    {
+        "question": "Consider the set of all continuous and infinitely differentiable functions $f$ with domain $[0,2025]$ satisfying $f(0)=0, f^{\\prime}(0)=0, f^{\\prime}(2025)=1$, and $f^{\\prime \\prime}$ being strictly increasing on the interval $[0,2025]$. Compute the smallest real number $M$ such that for all functions $f$ in this set, $f(2025)<M$.",
+        "answer": "\\frac{2025}{2}"
+    },
+    {
+        "question": "In the diagram, the larger regular hexagon has side length $1$. A black dot moves with constant velocity from $A$ to $B$, two vertices on the larger hexagon as shown in the diagram. The dashed regular hexagon is then drawn with one of its vertices on the black dot while remaining rotationally symmetric with respect to the center of the larger hexagon (i.e. the dashed hexagon has the same center as the large hexagon). Compute the average area of the dashed hexagon over time as the black dot travels from $A$ to $B$.\n\n\\begin{asy}\nsize(200);\npen thinGray = gray + 0.5;\npen pathStyle = dashed + linewidth(1.2);\npen arrowStyle = black + linewidth(1.5);\npair A, B;\n\n// Define the 6 vertices of a regular hexagon centered at origin\npair[] hex;\nfor (int i = 0; i < 6; ++i)\n    hex[i] = dir(60*i);\n\n// Define point labels\nA = hex[1]; // top right\nB = hex[3]; // middle left\n\n// Draw hexagon with thicker border\nfor (int i = 0; i < 6; ++i)\n    draw(hex[i]--hex[(i+1)%6], black);\n\nfor (int i = 0; i < 6; ++i)\n    draw(hex[i]--hex[(i+2)%6], gray);\n\npair[] hex2;\nfor (int i = 0; i < 6; ++i)\n    hex2[i] = 0.71*dir(60*i+15);\n\nfor (int i = 0; i < 6; ++i)\n    draw(hex2[i]--hex2[(i+1)%6], pathStyle);\n\n// Mark dot along the path near point A\ndot((0.8*hex[1] + 0.2*hex[3]), black);\ndraw((0.8*hex[1] + 0.2*hex[3])--(0.7*hex[1] + 0.3*hex[3]), pathStyle, Arrow(6));\n\n// Labels\nlabel(\"$A$\", A, NE);\nlabel(\"$B$\", B, SW);\n\\end{asy}",
+        "answer": "\\frac{3 \\sqrt{3}}{4}"
+    },
+    {
+        "question": "Compute\n\n$$\n\\lim _{t \\rightarrow 0}\\left(\\prod_{n=2}^{\\infty}\\left(1+\\frac{t}{n^{2}+n}\\right)\\right)^{\\frac{1}{t}}\n$$",
+        "answer": "e^{\\frac{1}{2}}"
+    },
+    {
+        "question": "Let $R$ be the region in the complex plane enclosed by the curve $f(\\theta)=e^{i \\theta}+e^{2 i \\theta}+\\frac{1}{3} e^{3 i \\theta}$ for $0 \\leq$ $\\theta \\leq 2 \\pi$. Compute the perimeter of $R$.",
+        "answer": "2 \\sqrt{3}+\\frac{8 \\pi}{3}"
+    },
+    {
+        "question": "Consider the function\n\n$$\nf(x)=\\frac{(2025+x) \\ln (2025+x)}{x^{3}-6 x^{2}+11 x-6}\n$$\ndefined for all real numbers except $x=1,2$, and $3$. For a positive integer $n$, let $d_{n}$ denote $\\frac{f^{(n)}(0)}{n!}$, where $f^{(n)}(x)$ is the $n^{\\text {th }}$ derivative of $f(x)$. Compute $\\lim _{n \\rightarrow \\infty} d_{n}$.",
+        "answer": "-1013 \\ln (2026)"
+    },
+    {
+        "question": "Let $S$ be a sphere centered at the origin $O$ with radius $1$. Let $A=(0,0,1)$. Let $B$ and $C$ be two points (not equal to $A$ or each other) on the sphere's surface with equal $z$ coordinate. Let minor arc $A B$ be the shorter distance on the intersection of the sphere with the plane containing $A, B$, and $O$ and similarly, let minor arc $A C$ be the shorter distance on the intersection of the sphere with the plane containing $A, C$, and $O$. Let the minor arc $B C$ be the shorter distance on the intersection of the sphere with the plane parallel to the $x y$ plane and at the same $z$ value as $B$ (or either if the two arcs have the same length). The three arcs combined divide the surface of the sphere into two regions. Given that the area of smaller region enclosed by arcs $A B, A C$, and $B C$ is $3$, compute the minimum possible sum of the arc lengths of $A B, A C$, and $B C$.",
+        "answer": "\\frac{4 \\pi}{3}+\\sqrt{3}"
+    },
+    {
+        "question": "The boxes in the expression below are filled with the numbers $3,4,5,6$, and $7$, so that each number is used exactly once, and the value of the expression is a prime number. Compute the value of the expression.\n\n$$\n\\square \\times \\square \\times \\square+\\square \\times \\square\n$$\n",
+        "answer": "107"
+    },
+    {
+        "question": "Compute the number of five letter words that can be formed from $a, b$, and $c$ such that neither $a b$ nor $a c$ appears in the word. For example, $b c b a a$ would be valid but $a a b c b$ would be invalid.",
+        "answer": "63"
+    },
+    {
+        "question": "In a $3 \\times 3$ grid, exactly one of the two possible diagonals is drawn in each of the nine cells. Compute the number of ways to choose the diagonals such that there is a continuous path along diagonals from the bottom-left vertex to the top-right vertex.",
+        "answer": "79"
+    },
+    {
+        "question": "Professor Matrix Tessellation Laplace is thinking of two positive odd numbers (not necessarily distinct). Given that their product has exactly $15$ positive divisors, compute the smallest possible sum of these two numbers.",
+        "answer": "90"
+    },
+    {
+        "question": "Consider an axis-aligned $4$ dimensional cube with side length $4$, subdivided into $4^{4}$ unit cubes. Cubey the penguin starts at a random unit cube. Each second, he can move to an adjacent unit cube along any one of the four axes. A fish is independently placed in a uniformly random unit cube (possibly the same one as Cubey's starting position) and the fish does not move (it's a fish out of water). Compute the expected time in seconds that Cubey will take to catch the fish, assuming he moves optimally to reach the fish as fast as possible.",
+        "answer": "5"
+    },
+    {
+        "question": "Define the function $f(n)$ to be the remainder when $\\binom{n}{20}$ is divided by $23$. Find $f(20)+f(21)+$ $\\cdots+f(2023)$.",
+        "answer": "2024"
+    },
+    {
+        "question": "Professor Matrix Tessellation Laplace arranges all of the integers from $1$ to $99999$ (inclusive) in the order that maximizes the gigantic number formed by concatenating them. In his order, the number $2025$ appears as the $i$-th integer from left to right. Find $i$.\n(Formally, he sets the permutation $\\sigma=\\left(\\sigma_{1}, \\ldots, \\sigma_{99999}\\right)$ of $\\{1,2, \\ldots, 99999\\}$ such that the value of the concatenation $\\overline{\\sigma_{1} \\sigma_{2} \\ldots \\sigma_{99999}}$ is maximized. Find the index $i$ such that $\\sigma_{i}=2025$.)\n",
+        "answer": "88607"
+    },
+    {
+        "question": "For any permutation $\\sigma=\\left(a_{1}, a_{2}, \\ldots, a_{8}\\right)$ of the set $\\{1,2, \\ldots, 8\\}$ and some index $1 \\leq k \\leq 8$, define\n\n$$\nL_{k}(\\sigma)=\\operatorname{lcm}\\left(a_{1}, a_{2}, \\ldots, a_{k}\\right)\n$$\nwhere $\\operatorname{lcm}\\left(a_{1}, a_{2}, \\ldots, a_{k}\\right)$ denotes the least common multiple of $a_{1}, a_{2}, \\ldots, a_{k}$. An index $2 \\leq k \\leq 8$ is called increasing if $L_{k}(\\sigma)>L_{k-1}(\\sigma)$. Let $T(\\sigma)$ be the total number of increasing indices of $\\sigma$. Compute the expected value of $T(\\sigma)$ when $\\sigma$ is chosen uniformly at random among all permutations of $\\{1,2, \\ldots, 8\\}$.",
+        "answer": "\\frac{157}{40}"
+    },
+    {
+        "question": "Let $\\alpha$ be the permutation of $\\{0,1, \\ldots, 12\\}$ satisfying $\\alpha(0)=0, \\alpha(n)=n+1$ for odd $n$, and $\\alpha(n)=n-1$ for positive even $n$. Let $f(n)$ be the unique polynomial of minimal degree with coefficients in $\\{0,1, \\ldots, 12\\}$ such that $13 \\mid f(n)-\\alpha(n)$ for all $n \\in\\{0,1, \\ldots, 12\\}$. If $f(n)$ has degree $d$ and can be expressed as $f(n)=\\sum_{i=0}^{d} a_{i} n^{i}$, find $100 a_{d}+a_{1}$.",
+        "answer": "608"
+    },
+    {
+        "question": "Let $s_{0}$ be a square. One diagonal of $s_{0}$ is chosen, and a square $s_{1}$ is drawn with this diagonal as one of its sides. There are four possible such squares $s_{1}$; one is chosen out of these four uniformly at random. Choose $s_{2}$ in the same manner (so that it has a side which is a diagonal of $s_{1}$ ), and continue similarly with $s_{3}, s_{4}, \\ldots$. Let $p\\left(s_{n}\\right)$ be the probability that square $s_{n}$ shares an interior with $s_{0}$ (in other words, the area of their intersection is positive). Compute the value that $p\\left(s_{n}\\right)$ approaches as $n$ approaches infinity.",
+        "answer": "\\frac{5}{12}"
+    },
+    {
+        "question": "Let $\\triangle A B C$ be an equilateral triangle with side length $6$. Points $D, E$, and $F$ lie on sides $A B, B C$, and $C A$ respectively such that $\\triangle D E F$ is equilateral and has area equal to $\\triangle F A D$. Compute the side length of $\\triangle D E F$.",
+        "answer": "3"
+    },
+    {
+        "question": "We have a $5 \\times 5 \\times 5$ cube made up of $1 \\times 1 \\times 1$ cardinal red and transparent pieces. When looking at the cube, we always see a cardinal red piece if it is behind any transparent pieces. When viewing each face straight-on, we can see the letters S, M, T on the top, front, and right side, respectively (as arranged in the diagram). The three other empty sides solely serve the purpose to show which faces of the cube are important and how they are positioned relative to each other. Compute the maximum possible number of cardinal red pieces within this cube. \n\n             _____\n            |+++++|\n            |+----|\n            |+++++|\n            |----+|\n            |+++++|\n _____ _____ _____ _____       \n|-----|-----|+++++|+++++|\n|-----|-----|+-+-+|--+--|\n|-----|-----|+-+-+|--+--|\n|-----|-----|+-+-+|--+--|\n|-----|-----|+-+-+|--+--|\n _____ _____ _____ _____ \n            |-----|\n            |-----|\n            |-----|\n            |-----|\n            |-----|\n             _____\n\n",
+        "answer": "29"
+    },
+    {
+        "question": "Let $\\Omega$ be a circle. Draw two radii $r_{1}$ and $r_{2}$ of $\\Omega$ that form a $40^{\\circ}$ angle, and let $\\omega$ be a circle which is tangent to both of these radii and internally tangent to $\\Omega$. Let $\\omega$ be tangent to $\\Omega$ and $r_{1}$ at $A$ and $B$, respectively, and let $r_{1}$ meet $\\Omega$ at $C$. Compute $\\angle A B C$.\n",
+        "answer": "55"
+    },
+    {
+        "question": "The rectangles $L_{1}$ and $L_{2}$ are similar, where corresponding sides of $L_{1}$ are $\\frac{5}{2}$ times the length of the corresponding sides of $L_{2}$. Rectangle $L_{1}$ is inscribed in a circle $\\omega$, and rectangle $L_{2}$ meets $\\omega$ at two points, with its long side lying on the long side of $L_{1}$. If $r$ and $s$ are the side lengths of $L_{1}$, where $s>r$, compute $\\frac{s}{r}$.",
+        "answer": "\\frac{2 \\sqrt{6}}{3}"
+    },
+    {
+        "question": "Let $\\alpha$ and $\\beta$ be two angles in $[0,2 \\pi)$, and let $A=(\\cos \\alpha, \\sin \\alpha), B=(\\cos \\beta, \\sin \\beta)$ and $C=$ $(\\cos \\alpha+\\cos \\beta, \\sin \\alpha+\\sin \\beta)$. If one of the points has coordinates $\\left(\\frac{32}{25}, \\frac{24}{25}\\right)$, compute the area of $A B C$.",
+        "answer": "\\frac{12}{25}"
+    },
+    {
+        "question": "Let $\\mathcal{P}$ be a parabola with its vertex at $A$, and let $B$ and $C$ be two other distinct points on $\\mathcal{P}$. The focus $F$ of $\\mathcal{P}$ is the centroid of $\\triangle A B C$. If $F B=3$, compute the area of $\\triangle A B C$.",
+        "answer": "\\frac{54 \\sqrt{6}}{25}"
+    },
+    {
+        "question": "Triangle $\\triangle A_{1} A_{2} A_{3}$ has side lengths $A_{1} A_{2}=13$, $A_{2} A_{3}=14, A_{3} A_{1}=15$. Points $B_{i}$ and $C_{i}$ lie on $\\overline{A_{i+1} A_{i+2}}$ such that $\\angle B_{i} A_{i} C_{i}=30^{\\circ}$ for $1 \\leq i \\leq 3$, where $A_{4}=A_{1}$ and $A_{5}=A_{2}$. For $1 \\leq i \\leq 3$, let $D_{i}$ be the intersection of $\\overline{A_{i} B_{i}}$ and $\\overline{A_{i+1} C_{i+1}}$ and $E_{i}$ the intersection of $\\overline{A_{i} C_{i}}$ and $\\overline{A_{i+1} B_{i+1}}$, where $A_{4}=$ $A_{1}, B_{4}=B_{1}, C_{4}=C_{1}$. If $D_{1} E_{3} D_{2} E_{1} D_{3} E_{2}$ forms a convex hexagon with an inscribed circle of radius $r$, compute $r$.",
+        "answer": "\\frac{65 \\sqrt{6}-65 \\sqrt{2}}{32}"
+    },
+    {
+        "question": "Let $P A B C D$ be a pyramid with rectangular base $A B C D$ and $\\frac{\\cos \\angle A P C}{\\cos \\angle B P D}=2$. If $B P=4$ and $D P=9$, compute $A P+C P$.",
+        "answer": "\\sqrt{133}"
+    },
+    {
+        "question": "Let $A B C D$ be a square centered at $E$ with side length $10$. Point $P$ lies on the extension of line $C D$ past point $D$. There exists a point $Q$ on line $A P$ such that lines $E Q, B P$, and $A D$ are concurrent. If $E Q=7 \\sqrt{2}$, compute $|A Q-D Q|$.",
+        "answer": "2"
+    },
+    {
+        "question": "Let $A F D C$ be a rectangle. Construct points $E$ and $B$ outside of $A F D C$ such that $A B=B C=$ $D E=E F=45$ and $A B C D E F$ is a convex hexagon. Let $\\mathcal{E}$ be an inscribed ellipse tangent to sides $A B, B C, C D, D E, E F, F A$ at points $U, V, W, X, Y$, and $Z$, respectively. Points $F_{1}$ and $F_{2}$ with $F_{1}$ closer to $B$ are the foci of $\\mathcal{E}$ satisfying $\\triangle A B C \\cong \\triangle F_{1} W F_{2} \\cong \\triangle D E F$. Let $Q$ be on line $C D$ such that $F_{1} Y \\perp Z Q$. Compute the area of quadrilateral $F_{1} Q Y Z$.",
+        "answer": "1350 \\sqrt{3}"
+    },
+    {
+        "question": "The Stanford Tree buys $15$ eggs to bake a cake. Unfortunately, $n$ of these eggs are stale and one additional egg is rotten. The recipe requires the Tree to choose $3$ eggs from the lot. A combination is called bad if it contains at least one stale egg and no rotten eggs and awful if it contains the rotten egg (even if no other eggs are stale). Let $x$ denote the number of bad combinations and $y$ denote the number of awful combinations. Given that the ratio of $x$ to $y$ is $40: 13$, compute $n$.",
+        "answer": "5"
+    },
+    {
+        "question": "Compute the unique integer triple $(a, b, c)$ satisfying $0<a<b<c<100$ and $a \\cdot b+c=200$ that minimizes $c-a$.",
+        "answer": "13,14,18"
+    },
+    {
+        "question": "Alice has four sticks of lengths $3,3,5$, and $x$. She notices that it is possible to make a cyclic quadrilateral by joining these sticks at their endpoints, and no matter how she makes this cyclic quadrilateral, it always has a diagonal of length $6$. Compute $x$.",
+        "answer": "\\frac{27}{5}"
+    },
+    {
+        "question": "Archimedes, Basil, Cleopatra, Diophantus, and Euclid each made exactly one claim, listed below in some order:\n\n\\begin{enumerate}\n\\item At least two of the five statements are false.\n\\item Each interior angle of a regular pentagon has angle measure $108^{\\circ}$.\n\\item $2025$ is divisible by $4$.\n\\item Diophantus said the truth.\n\\item Euclid said the truth.\n\\end{enumerate}\nPythagoras is attempting to label each claim with the person who made it. A labeling is determinable if there exists a unique valid assignment of truth values (TRUE or FALSE) to the five claims such that the system of claims is consistent with the truth values. Compute the number of determinable labelings.\n\nFor example, consider the labeling of Archimedes to 1, Basil to 2, Cleopatra to 3, Diophantus to 4, and Euclid to $5$. Then one valid (but not unique) assignment of truth values is:\n\n1. TRUE 2. TRUE 3. FALSE 4. TRUE 5. FALSE.",
+        "answer": "66"
+    },
+    {
+        "question": "Compute $\\sin \\left(\\frac{\\pi}{24}\\right) \\sin \\left(\\frac{5 \\pi}{24}\\right)+\\sin \\left(\\frac{3 \\pi}{24}\\right) \\sin \\left(\\frac{7 \\pi}{24}\\right)+\\sin \\left(\\frac{5 \\pi}{24}\\right) \\sin \\left(\\frac{9 \\pi}{24}\\right)+\\cdots+\\sin \\left(\\frac{19 \\pi}{24}\\right) \\sin \\left(\\frac{23 \\pi}{24}\\right)$.",
+        "answer": "\\frac{10 \\sqrt{3}+\\sqrt{6}+\\sqrt{2}}{4}"
+    },
+    {
+        "question": "Compute the number of ordered pairs of positive integers $(x, y)$ with $x+y \\leq 20$ for which there exists a positive integer $n$ satisfying $n=\\operatorname{lcm}(n, x)-\\operatorname{gcd}(n, y)$.",
+        "answer": "36"
+    },
+    {
+        "question": "On a $6 \\times 6$ grid, $12$ identical pebbles are placed in the cells such that there are exactly $2$ pebbles in every row and every column. Partition the pebbles into groups by declaring that two pebbles belong to the same group if one can reach the other by a sequence of moves between pebbles that lie in the same row or the same column.\n\nGiven a valid arrangement $A$ of these $12$ pebbles, define $f(A)$ to be the number of groups in $A$. Let $S$ be the set of all valid arrangements $A$.\nCompute $\\sum_{A \\in S} 2^{f(A)}$.\n",
+        "answer": "190800"
+    },
+    {
+        "question": "For positive integers $p$ and $q$, there are exactly $14$ ordered pairs of real numbers $(a, b)$ with $0<$ $a, b<1$ such that both $a p+3 b$ and $2 a+b q$ are positive integers. Compute the number of possible ordered pairs $(p, q)$.",
+        "answer": "7"
+    },
+    {
+        "question": "Let $\\omega_{1}$ and $\\omega_{2}$ be circles such that $\\omega_{2}$ passes through the center of $\\omega_{1}$ and is also internally tangent to it. In addition, let $A B$ be a chord of $\\omega_{1}$ tangent to $\\omega_{2}$ at some point $T$. Given that $A T=9$ and $B T=16$, compute the radius of $\\omega_{1}$.",
+        "answer": "\\frac{288 \\sqrt{527}}{527}"
+    },
+    {
+        "question": "For each positive integer $n$, define the coloring $C_{n}$ as a coloring of all lattice points (i.e. points with integer coordinates) on the plane such that any two points $A=\\left(A_{x}, A_{y}\\right), B=\\left(B_{x}, B_{y}\\right)$ have the same color if and only if $A_{x}+A_{y}$ and $B_{x}+B_{y}$ have the same remainder when divided by $n$. A positive integer $n$ is called broken if in the coloring $C_{n}$ there exist two points of different color and Euclidean distance a positive integer divisible by $n$. Find the sum of all broken positive integers less than or equal to $50$.",
+        "answer": "511"
+    },
+    {
+        "question": "There are thirteen lamps arranged in a circle in the complex plane, with lamp $k$ (for $0 \\leq k \\leq 12$ ) located at $z_{k}=e^{2 \\pi i k / 13}$. Lamp $0$ is always on, while lamps $1$ to $12$ are initially turned off. For each $1 \\leq r \\leq 12$, toggling lamp $r$ will flip it from on to off (and vice versa) and will also flip its\nneighbors, excluding lamp $0$ if it is a neighbor. Let $s$ be the sum of the positions $z_{k}$ for lamps which are on. Compute the maximum possible value of $|s|$ over all configurations of switched on lamps reachable by flipping some subset of lamps from the initial state.",
+        "answer": "\\frac{\\sin (6 \\pi / 13)}{\\sin (\\pi / 13)}"
+    },
+    {
+        "question": "Let $S$ be the set of all strings of length $15$ formed from five $1$s, $2$s, and $3$s. Say a string in $S$ is threnodic if:\n\n\\begin{itemize}\n\\item No two adjacent characters are the same, and\n\\item Through a sequence of removals of contiguous substrings $123,231$, and $312$, the string can be deleted (note that the intermediate strings can have adjacent equal characters).\n\\end{itemize}\n\nCompute the number of threnodic strings in $S$.",
+        "answer": "213"
+    },
+    {
+        "question": "Let $\\triangle A B C$ be an acute triangle with circumcircle $\\omega_{1}$, and let $D$ be a point on segment $B C$. Circle $\\omega_{2}$ is tangent to segment $A D$, segment $B D$, and $\\omega_{1}$. Circle $\\omega_{3}$ is tangent to segment $A D$, segment $C D$, and $\\omega_{1}$, and both circles are on the same side of $B C$ as $A$. If circles $\\omega_{2}$ and $\\omega_{3}$ have radii $5$ and $7$, respectively, with centers $13$ units apart, compute the sum of all possible lengths of the inradius of $\\triangle A B C$.",
+        "answer": "\\frac{1980}{169}"
+    },
+    {
+        "question": "Carolina has a jar of red, green, and white jelly beans. She replaces $400$ red beans with green ones, then $200$ green beans with white ones. Initially, the percentage of red beans minus the percentage of green beans was $X \\%$. After the replacements, this difference became $(X-2.5) \\%$. Compute the number of beans in the jar.",
+        "answer": "24000"
+    },
+    {
+        "question": "Six friends-Andrea, Blake, Camila, Dean, Ethan, and Francis-drink a combined total of $32$ cups of boba. Each person drinks at least one cup, no two friends drink the same number of cups, and each cup is fully finished by a single person. One friend, known as the \"Boba Champion\", drinks as many cups as all the others combined. Compute the product of the number of cups of boba consumed by the five friends who aren't the Boba Champion.",
+        "answer": "144"
+    },
+    {
+        "question": "The absolute values of all three roots of the polynomial $x^{3}-147 x+c$ are primes. Compute $|c|$. (A prime number is a positive integer greater than $1$ whose only positive divisors are $1$ and itself.)",
+        "answer": "286"
+    },
+    {
+        "question": "Compute the sum of the real roots of $\\left(x^{2}+16 x+48\\right)\\left(x^{2}+24 x+128\\right)=44^{2^{2025}}$. (Roots are counted with multiplicity.)",
+        "answer": "-20"
+    },
+    {
+        "question": "Given real numbers $s, m$, and $t$ such that $s^{2}+m^{2}+t^{2}=8, s^{3}+m^{3}+t^{3}=11$, and $s^{4}+m^{4}+t^{4}=25$, compute the value of $(s+m+t)(s+m-t)(s-m+t)(s-m-t)$.",
+        "answer": "-14"
+    },
+    {
+        "question": "Compute the number of integers between $1$ and $2025$ inclusive that cannot be represented as $x(\\lceil x\\rceil+\\lfloor x\\rfloor)$ for any positive real number $x$.",
+        "answer": "1002"
+    },
+    {
+        "question": "The Fibonacci numbers are defined by $F_{1}=F_{2}=1$ and $F_{n}=F_{n-1}+F_{n-2}$ for all positive integers $n \\geq 3$. Let $S=\\left\\{2^{F_{2}}, 2^{F_{3}}, \\ldots, 2^{F_{27}}, 2^{F_{28}}\\right\\}=\\left\\{2,4, \\ldots, 2^{196418}, 2^{317811}\\right\\}$ be a set. If\n\n$$\nP=\\prod_{x \\in S} \\prod_{y \\in S} x^{\\log_{3} y}\n$$\nis the product of $x^{\\log_{3} y}$ across all ordered pairs of elements ( $x, y$ ) in $S$, including when $x=y$, compute $\\sqrt{\\log_{2} P}$.",
+        "answer": "832038\\sqrt{\\log_{3} 2}"
+    },
+    {
+        "question": "Let $Z$ be the set of all complex numbers $z$ such that $|z|=1$ and\n$$\nz^{8}+i z^{6}-(1+i) z^{5}+(1-i) z^{3}+i z^{2}-1=0\n$$\n\nwith the polar angle $\\theta_{z}$ (the angle in $[0,2 \\pi)$ that $z$ makes with the positive real axis, measured counterclockwise) lying in the interval $[0, \\pi)$. Compute the sum of all distinct values of $\\theta_{z}$ for $z$ in $Z$. Compute the answer in radians.",
+        "answer": "\\frac{29 \\pi}{12}"
+    },
+    {
+        "question": "Define a sequence $\\left\\{a_{n}\\right\\}$ by $a_{1}=5$ and $a_{n+1}=\\frac{5 a_{n}+\\sqrt{21 a_{n}^{2}+4}}{2}$ for $n \\geq 1$. Compute the value of\n\n$$\n\\sum_{n=1}^{\\infty} \\frac{1}{a_{n} a_{n+1}}\n$$",
+        "answer": "\\frac{23-5 \\sqrt{21}}{10}"
+    },
+    {
+        "question": "Let $f(x)=4 x+a, g(x)=6 x+b$, and $h(x)=9 x+c$. Let $S(a, b, c)$ be the set of the $3^{20}$ functions formed by all possible compositions of $f, g, h$ a total of $20$ times, and let $R(a, b, c)$ be the number of distinct roots over all functions in $S(a, b, c)$. Compute the second smallest possible value of $R(a, b, c)$ as $a, b, c$ range over all reals.",
+        "answer": "41"
+    }
+]
