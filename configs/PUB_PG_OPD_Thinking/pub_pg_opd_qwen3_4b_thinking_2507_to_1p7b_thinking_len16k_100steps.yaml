@@ -1,12 +1,12 @@
-# Signed PG-OPD: Qwen3-4B Teacher and Qwen3-1.7B Student, both thinking.
+# Signed PG-OPD: Qwen3-4B-Thinking-2507 Teacher and Qwen3-1.7B Student, both thinking.
 
 defaults:
   - /base
   - _self_
 
-run_name: pub_pg_opd_qwen3_4b_to_1p7b_thinking_len16k_100steps
+run_name: pub_pg_opd_qwen3_4b_thinking_2507_to_1p7b_thinking_len16k_100steps
 group_name: PUB_PG_OPD_Thinking
-run_name_prefix: pub_pg_opd_qwen3_4b_to_1p7b_thinking_len16k_100steps
+run_name_prefix: pub_pg_opd_qwen3_4b_thinking_2507_to_1p7b_thinking_len16k_100steps
 
 student_prompt: qwen3_thinking_prompt
 teacher_prompt: qwen3_thinking_prompt
@@ -54,7 +54,7 @@ distillation:
   teacher_chunk_size: 128
   teacher_models:
     teacher_model:
-      model_path: ./models/Qwen3-4B
+      model_path: ./models/Qwen3-4B-Thinking-2507
       inference:
         response_length: 16384
         # 2048 prompt + 16384 response + one teacher prediction token.
