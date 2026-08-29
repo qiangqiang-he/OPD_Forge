@@ -336,13 +336,27 @@ def validate_opd_runtime_config(config) -> None:
     if student_gpus <= 0 or teacher_gpus <= 0:
         raise ValueError("Both student and teacher must receive at least one GPU.")
 
-    if (
-        int(teacher.tensor_model_parallel_size) != 1
-        or int(teacher.data_parallel_size) != 1
-    ):
+    teacher_tp = int(teacher.tensor_model_parallel_size)
+    teacher_dp = int(teacher.data_parallel_size)
+    teacher_pp = int(teacher.pipeline_model_parallel_size)
+    if min(teacher_tp, teacher_dp, teacher_pp) <= 0:
         raise ValueError(
-            "Each OPD teacher replica must occupy exactly one GPU; set teacher "
-            "TP=1 and per-replica DP=1."
+            "Teacher TP, per-replica DP, and PP must all be positive; got "
+            f"TP={teacher_tp}, DP={teacher_dp}, PP={teacher_pp}."
+        )
+    if teacher_dp != 1:
+        raise ValueError(
+            "OPD Teacher replicas use external request-level load balancing; "
+            "set per-replica data_parallel_size=1."
+        )
+
+    teacher_replica_gpus = teacher_tp * teacher_dp * teacher_pp
+    if teacher_gpus % teacher_replica_gpus != 0:
+        raise ValueError(
+            "Each OPD Teacher replica must fit evenly in the dedicated Teacher "
+            f"pool; got replica_world_size={teacher_replica_gpus} "
+            f"(TP={teacher_tp} * DP={teacher_dp} * PP={teacher_pp}) and "
+            f"teacher_gpus={teacher_gpus}."
         )
 
 
