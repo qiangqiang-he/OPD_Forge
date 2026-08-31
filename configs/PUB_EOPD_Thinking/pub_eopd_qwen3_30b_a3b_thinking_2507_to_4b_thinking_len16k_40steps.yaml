@@ -1,12 +1,12 @@
-# ExOPD: Qwen3-4B-Thinking-2507 Teacher and Qwen3-1.7B Student, both thinking.
+# Entropy-gated OPD: Qwen3-30B-A3B-Thinking-2507 Teacher and Qwen3-4B Student, both thinking.
 
 defaults:
   - /base
   - _self_
 
-run_name: pub_exopd_qwen3_4b_thinking_2507_to_1p7b_thinking_len16k_100steps
-group_name: PUB_ExOPD_Thinking
-run_name_prefix: pub_exopd_qwen3_4b_thinking_2507_to_1p7b_thinking_len16k_100steps
+run_name: pub_eopd_qwen3_30b_a3b_thinking_2507_to_4b_thinking_len16k_40steps
+group_name: PUB_EOPD_Thinking
+run_name_prefix: pub_eopd_qwen3_30b_a3b_thinking_2507_to_4b_thinking_len16k_40steps
 
 student_prompt: qwen3_thinking_prompt
 teacher_prompt: qwen3_thinking_prompt
@@ -20,16 +20,10 @@ data:
 
 actor_rollout_ref:
   model:
-    path: ./models/Qwen3-1.7B
+    path: ./models/Qwen3-4B
   actor:
     # 2048 prompt + 16384 training response + one shifted-logit token.
     ppo_max_token_len_per_gpu: 18433
-    loss_agg_mode: token-mean
-    fsdp_config:
-      # ExOPD colocates a complete current Student and frozen initial Student.
-      fsdp_size: 1
-      param_offload: false
-      optimizer_offload: false
     optim:
       lr: 1.0e-6
   rollout:
@@ -48,13 +42,9 @@ actor_rollout_ref:
       n: 16
   ref:
     log_prob_max_token_len_per_gpu: 18433
-    fsdp_config:
-      fsdp_size: 1
-      param_offload: false
-      forward_only_keep_on_device: true
 
 algorithm:
-  name: exopd
+  name: eopd
 
 rlvr_generation:
   train_max_new_tokens: 16384
@@ -64,26 +54,31 @@ distillation:
   teacher_chunk_size: 128
   teacher_models:
     teacher_model:
-      model_path: ./models/Qwen3-4B-Thinking-2507
+      model_path: ./models/Qwen3-30B-A3B-Thinking-2507
       inference:
         response_length: 16384
+        tensor_model_parallel_size: 4
         # 2048 prompt + 16384 response + one teacher prediction token.
         max_model_len: 18433
         engine_kwargs:
           vllm:
-            max_logprobs: 16
+            # Top-16 plus one full-vocabulary entropy carrier.
+            max_logprobs: 17
+            eopd_entropy_topk: 16
   distillation_loss:
-    loss_mode: exopd_reverse_kl
-    exopd_lambda: 1.25
+    loss_mode: eopd
+    topk: 16
+    eopd_entropy_threshold: 0.8
+    eopd_alpha: 1.0
     selection_ratio: 1.0
     selection_method: random
-    loss_max_clamp: null
+    loss_max_clamp: 20.0
     log_prob_min_clamp: null
     policy_loss_mode: reinforce
 
 trainer:
   experiment_name: ${run_name}
-  total_training_steps: 100
+  total_training_steps: 40
   default_local_dir: ./outputs/${run_name}
   val_before_train: true
   test_freq: 20

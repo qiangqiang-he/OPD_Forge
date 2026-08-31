@@ -1,0 +1,91 @@
+# ExOPD: Qwen3-30B-A3B-Thinking-2507 Teacher and Qwen3-8B Student, both thinking.
+
+defaults:
+  - /base
+  - _self_
+
+run_name: pub_exopd_qwen3_30b_a3b_thinking_2507_to_8b_thinking_len16k_40steps
+group_name: PUB_ExOPD_Thinking
+run_name_prefix: pub_exopd_qwen3_30b_a3b_thinking_2507_to_8b_thinking_len16k_40steps
+
+student_prompt: qwen3_thinking_prompt
+teacher_prompt: qwen3_thinking_prompt
+
+data:
+  train_files:
+    - ./data/DAPO-17k.json
+  val_files:
+    - ./data/AMC-2023.json
+  max_response_length: 16384
+
+actor_rollout_ref:
+  model:
+    path: ./models/Qwen3-8B
+  actor:
+    # 2048 prompt + 16384 training response + one shifted-logit token.
+    ppo_max_token_len_per_gpu: 18433
+    loss_agg_mode: token-mean
+    fsdp_config:
+      # ExOPD colocates a complete current Student and frozen initial Student.
+      fsdp_size: 1
+      param_offload: false
+      optimizer_offload: false
+    optim:
+      lr: 1.0e-6
+  rollout:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    n: 1
+    # 2048 prompt + 16384 response.
+    max_model_len: 18432
+    max_num_batched_tokens: 18432
+    log_prob_max_token_len_per_gpu: 18433
+    val_kwargs:
+      temperature: 0.6
+      top_p: 0.95
+      top_k: -1
+      n: 16
+  ref:
+    log_prob_max_token_len_per_gpu: 18433
+    fsdp_config:
+      fsdp_size: 1
+      param_offload: false
+      forward_only_keep_on_device: true
+
+algorithm:
+  name: exopd
+
+rlvr_generation:
+  train_max_new_tokens: 16384
+  val_max_new_tokens: 16384
+
+distillation:
+  teacher_chunk_size: 128
+  teacher_models:
+    teacher_model:
+      model_path: ./models/Qwen3-30B-A3B-Thinking-2507
+      inference:
+        response_length: 16384
+        tensor_model_parallel_size: 4
+        # 2048 prompt + 16384 response + one teacher prediction token.
+        max_model_len: 18433
+        engine_kwargs:
+          vllm:
+            max_logprobs: 16
+  distillation_loss:
+    loss_mode: exopd_reverse_kl
+    exopd_lambda: 1.25
+    selection_ratio: 1.0
+    selection_method: random
+    loss_max_clamp: null
+    log_prob_min_clamp: null
+    policy_loss_mode: reinforce
+
+trainer:
+  experiment_name: ${run_name}
+  total_training_steps: 40
+  default_local_dir: ./outputs/${run_name}
+  val_before_train: true
+  test_freq: 20
+  save_freq: 20

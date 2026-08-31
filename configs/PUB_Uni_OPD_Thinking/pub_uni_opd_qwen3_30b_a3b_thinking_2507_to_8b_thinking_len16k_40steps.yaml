@@ -1,12 +1,12 @@
-# Unified trajectory-level OPD: Qwen3-4B Teacher and Qwen3-0.6B Student, both thinking.
+# Unified trajectory-level OPD: Qwen3-30B-A3B-Thinking-2507 Teacher and Qwen3-8B Student, both thinking.
 
 defaults:
   - /base
   - _self_
 
-run_name: pub_uni_opd_qwen3_4b_to_0p6b_thinking_len16k_100steps
+run_name: pub_uni_opd_qwen3_30b_a3b_thinking_2507_to_8b_thinking_len16k_40steps
 group_name: PUB_Uni_OPD_Thinking
-run_name_prefix: pub_uni_opd_qwen3_4b_to_0p6b_thinking_len16k_100steps
+run_name_prefix: pub_uni_opd_qwen3_30b_a3b_thinking_2507_to_8b_thinking_len16k_40steps
 
 student_prompt: qwen3_thinking_prompt
 teacher_prompt: qwen3_thinking_prompt
@@ -22,7 +22,7 @@ data:
 
 actor_rollout_ref:
   model:
-    path: ./models/Qwen3-0.6B
+    path: ./models/Qwen3-8B
   actor:
     ppo_mini_batch_size: 16
     # 2048 prompt + 16384 training response + one shifted-logit token.
@@ -64,9 +64,10 @@ distillation:
   teacher_chunk_size: 128
   teacher_models:
     teacher_model:
-      model_path: ./models/Qwen3-4B
+      model_path: ./models/Qwen3-30B-A3B-Thinking-2507
       inference:
         response_length: 16384
+        tensor_model_parallel_size: 4
         # 2048 prompt + 16384 response + one teacher prediction token.
         max_model_len: 18433
         engine_kwargs:
@@ -82,7 +83,7 @@ distillation:
 
 trainer:
   experiment_name: ${run_name}
-  total_training_steps: 100
+  total_training_steps: 40
   default_local_dir: ./outputs/${run_name}
   val_before_train: true
   test_freq: 20
