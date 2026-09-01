@@ -16,39 +16,41 @@ data:
     - ./data/DAPO-17k.json
   val_files:
     - ./data/AMC-2023.json
-  max_response_length: 16384
+  max_response_length: 8192
 
 actor_rollout_ref:
   model:
     path: ./models/Qwen3-8B
   actor:
-    # 2048 prompt + 16384 training response + one shifted-logit token.
-    ppo_max_token_len_per_gpu: 18433
+    # 2048 prompt + 8192 training response + one shifted-logit token.
+    ppo_max_token_len_per_gpu: 10241
     optim:
       lr: 1.0e-6
   rollout:
+    gpu_memory_utilization: 0.30
+    enable_sleep_mode: false
     temperature: 1.0
     top_p: 1.0
     top_k: -1
     n: 1
-    # 2048 prompt + 16384 response.
-    max_model_len: 18432
-    max_num_batched_tokens: 18432
-    log_prob_max_token_len_per_gpu: 18433
+    # 2048 prompt + 8192 response.
+    max_model_len: 10240
+    max_num_batched_tokens: 10240
+    log_prob_max_token_len_per_gpu: 10241
     val_kwargs:
       temperature: 0.6
       top_p: 0.95
       top_k: -1
       n: 16
   ref:
-    log_prob_max_token_len_per_gpu: 18433
+    log_prob_max_token_len_per_gpu: 10241
 
 algorithm:
   name: eopd
 
 rlvr_generation:
-  train_max_new_tokens: 16384
-  val_max_new_tokens: 16384
+  train_max_new_tokens: 8192
+  val_max_new_tokens: 8192
 
 distillation:
   teacher_chunk_size: 128
@@ -56,10 +58,11 @@ distillation:
     teacher_model:
       model_path: ./models/Qwen3-30B-A3B-Thinking-2507
       inference:
-        response_length: 16384
+        enable_sleep_mode: false
+        response_length: 8192
         tensor_model_parallel_size: 4
-        # 2048 prompt + 16384 response + one teacher prediction token.
-        max_model_len: 18433
+        # 2048 prompt + 8192 response + one teacher prediction token.
+        max_model_len: 10241
         engine_kwargs:
           vllm:
             # Top-16 plus one full-vocabulary entropy carrier.
