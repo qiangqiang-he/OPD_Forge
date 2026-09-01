@@ -1,0 +1,70 @@
+# Evaluate complete local Hugging Face models directly. Paths are resolved
+# relative to the OPD_Forge project root; no verl checkpoint merge is run.
+run_name: qwen3_five_models_no_thinking
+
+model_source:
+  type: hf_models
+  models:
+    - name: Qwen3-1.7B
+      path: ./models/Qwen3-1.7B
+    - name: Qwen3-4B
+      path: ./models/Qwen3-4B
+    - name: Qwen3-8B
+      path: ./models/Qwen3-8B
+    - name: Qwen3-4B-Thinking-2507
+      path: ./models/Qwen3-4B-Thinking-2507
+    - name: Qwen3-30B-A3B-Thinking-2507
+      path: ./models/Qwen3-30B-A3B-Thinking-2507
+
+# Keep the datasets and evaluation contract identical to configs/eval/eval.yaml.
+datasets:
+  - name: AMC23
+    path: ./data/AMC-2023.json
+  - name: AIME24
+    path: ./data/AIME-2024.json
+  - name: AIME25
+    path: ./data/AIME-2025.json
+  - name: AIME26
+    path: ./data/AIME-2026.json
+  - name: HMMT-2026
+    path: ./data/HMMT-FEB-2026.json
+  - name: MATH500
+    path: ./data/MATH500.json
+
+prompt: qwen3_no_thinking_prompt
+seed: 42
+
+sampling:
+  temperature: 0.6
+  top_p: 0.95
+  n: 16
+  max_new_tokens: 32768
+
+# Generate once at 32768, truncate the same sampled token IDs at every limit,
+# then decode and score each prefix independently.
+length_control: [8192, 16384, 20480, 32768]
+
+report:
+  metrics: [avg_at_n, pass_at_n, mean_length, truncation_rate]
+
+runtime:
+  # Eight independent workers; every GPU loads one complete model replica.
+  # Models themselves are evaluated sequentially and released between models.
+  gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+  tensor_parallel_size: 1
+
+  # n=16 means 16 questions per GPU call and exactly 256 rollouts. The direct
+  # model evaluator rejects any value other than 256.
+  rollouts_per_gpu_batch: 256
+
+engine:
+  dtype: bfloat16
+  trust_remote_code: true
+  gpu_memory_utilization: 0.90
+  max_model_len: 34816  # 2048 prompt tokens + 32768 generated tokens
+  enable_prefix_caching: true
+
+# Results:
+#   ./eval_results/<run_name>/<model_name>.json
+#   ./eval_results/<run_name>/summary.json
+result_dir: ./eval_results

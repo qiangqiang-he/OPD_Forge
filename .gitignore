@@ -14,6 +14,12 @@ __pycache__/
 htmlcov/
 tests/
 
+# Versioned CPU regressions for the formal checkpoint/model evaluators.
+!tests/
+tests/*
+!tests/test_checkpoint_evaluation.py
+!tests/test_direct_model_evaluation.py
+
 # Local smoke and temporary experiment configurations
 configs/temp/
 

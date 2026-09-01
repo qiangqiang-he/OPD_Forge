@@ -34,6 +34,9 @@ from utils.prompts import get_prompt_template, render_prompt
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CHECKPOINT_PATTERN = re.compile(r"^global_step_(\d+)$")
 REQUIRED_METRICS = ("avg_at_n", "pass_at_n", "mean_length", "truncation_rate")
+CHECKPOINT_SOURCE = "checkpoints"
+DIRECT_MODEL_SOURCE = "models"
+HF_MODELS_TYPE = "hf_models"
 
 
 @dataclass(frozen=True)
@@ -43,10 +46,18 @@ class DatasetSpec:
 
 
 @dataclass(frozen=True)
+class ModelSpec:
+    name: str
+    path: Path
+
+
+@dataclass(frozen=True)
 class EvaluationConfig:
     config_path: Path
     project_root: Path
-    training_output: Path
+    source_type: str
+    training_output: Path | None
+    models: tuple[ModelSpec, ...]
     run_name: str
     datasets: tuple[DatasetSpec, ...]
     prompt_name: str
@@ -122,6 +133,7 @@ def load_evaluation_config(
     config_path: str | Path,
     *,
     project_root: Path = PROJECT_ROOT,
+    source_type: str = CHECKPOINT_SOURCE,
 ) -> EvaluationConfig:
     """Load and strictly validate the YAML evaluation contract."""
 
@@ -134,20 +146,89 @@ def load_evaluation_config(
     OmegaConf.resolve(raw_config)
     raw = _mapping(OmegaConf.to_container(raw_config, resolve=True), "config")
 
-    if "models" in raw:
-        raise ValueError(
-            "The evaluation config must contain training_output, not models. "
-            "Checkpoints are discovered automatically."
-        )
+    if source_type not in {CHECKPOINT_SOURCE, DIRECT_MODEL_SOURCE}:
+        raise ValueError(f"Unsupported evaluation source type: {source_type!r}")
 
-    training_output = _resolve_project_path(
-        raw.get("training_output"), project_root, "training_output"
-    )
-    if not training_output.is_dir():
-        raise NotADirectoryError(f"training_output is not a directory: {training_output}")
-    run_name = training_output.name
-    if not run_name:
-        raise ValueError(f"Cannot derive run_name from training_output: {training_output}")
+    training_output: Path | None
+    models: tuple[ModelSpec, ...]
+    if source_type == CHECKPOINT_SOURCE:
+        if "models" in raw or "model_source" in raw:
+            raise ValueError(
+                "The checkpoint evaluation config must contain training_output, not "
+                "model_source/models. Checkpoints are discovered automatically."
+            )
+        training_output = _resolve_project_path(
+            raw.get("training_output"), project_root, "training_output"
+        )
+        if not training_output.is_dir():
+            raise NotADirectoryError(
+                f"training_output is not a directory: {training_output}"
+            )
+        run_name = training_output.name
+        if not run_name:
+            raise ValueError(
+                f"Cannot derive run_name from training_output: {training_output}"
+            )
+        models = ()
+    else:
+        if "training_output" in raw:
+            raise ValueError(
+                "The direct-model evaluation config must contain model_source, not "
+                "training_output."
+            )
+        if "models" in raw:
+            raise ValueError(
+                "models must be nested under model_source in a direct-model config."
+            )
+        run_name = raw.get("run_name")
+        if not isinstance(run_name, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]*", run_name
+        ):
+            raise ValueError(
+                "run_name must be a filesystem-safe name containing only letters, "
+                "digits, dots, underscores, and hyphens."
+            )
+        model_source = _mapping(raw.get("model_source"), "model_source")
+        if model_source.get("type") != HF_MODELS_TYPE:
+            raise ValueError(
+                f"model_source.type must be {HF_MODELS_TYPE!r} for direct-model "
+                "evaluation."
+            )
+        raw_models = model_source.get("models")
+        if not isinstance(raw_models, list) or not raw_models:
+            raise ValueError("model_source.models must be a non-empty YAML list.")
+        parsed_models: list[ModelSpec] = []
+        seen_model_names: set[str] = set()
+        seen_model_paths: set[Path] = set()
+        for index, item in enumerate(raw_models):
+            model = _mapping(item, f"model_source.models[{index}]")
+            name = model.get("name")
+            if not isinstance(name, str) or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._-]*", name
+            ):
+                raise ValueError(
+                    f"model_source.models[{index}].name must be a filesystem-safe "
+                    "non-empty name."
+                )
+            if name in seen_model_names:
+                raise ValueError(f"Duplicate model name: {name}")
+            model_path = _resolve_project_path(
+                model.get("path"),
+                project_root,
+                f"model_source.models[{index}].path",
+            )
+            if model_path in seen_model_paths:
+                raise ValueError(f"Duplicate model path: {model_path}")
+            if not is_huggingface_model_dir(model_path):
+                raise ValueError(
+                    f"model_source.models[{index}].path is not a complete Hugging "
+                    f"Face model directory: {model_path}"
+                )
+            seen_model_names.add(name)
+            seen_model_paths.add(model_path)
+            parsed_models.append(ModelSpec(name=name, path=model_path))
+        training_output = None
+        models = tuple(parsed_models)
 
     raw_datasets = raw.get("datasets")
     if not isinstance(raw_datasets, list) or not raw_datasets:
@@ -243,6 +324,17 @@ def load_evaluation_config(
             "runtime.rollouts_per_gpu_batch must be divisible by sampling.n; "
             f"got {rollouts_per_gpu_batch} and n={n}."
         )
+    if source_type == DIRECT_MODEL_SOURCE:
+        if len(gpus) != 8:
+            raise ValueError(
+                "Direct-model evaluation requires exactly eight independent GPU "
+                f"workers; got {len(gpus)} GPU IDs."
+            )
+        if rollouts_per_gpu_batch != 256:
+            raise ValueError(
+                "Direct-model evaluation requires exactly 256 rollouts per GPU "
+                f"generate call; got {rollouts_per_gpu_batch}."
+            )
 
     engine = _mapping(raw.get("engine"), "engine")
     dtype = engine.get("dtype")
@@ -277,7 +369,9 @@ def load_evaluation_config(
     return EvaluationConfig(
         config_path=config_path,
         project_root=project_root,
+        source_type=source_type,
         training_output=training_output,
+        models=models,
         run_name=run_name,
         datasets=tuple(datasets),
         prompt_name=prompt_name,
@@ -321,10 +415,13 @@ def is_huggingface_model_dir(path: Path) -> bool:
 
     if not path.is_dir() or not (path / "config.json").is_file():
         return False
-    if _weight_index_is_complete(path, "model.safetensors.index.json"):
-        return True
-    if _weight_index_is_complete(path, "pytorch_model.bin.index.json"):
-        return True
+    index_names = (
+        "model.safetensors.index.json",
+        "pytorch_model.bin.index.json",
+    )
+    present_indexes = [name for name in index_names if (path / name).is_file()]
+    if present_indexes:
+        return any(_weight_index_is_complete(path, name) for name in present_indexes)
     weight_files = [
         *path.glob("*.safetensors"),
         *path.glob("pytorch_model*.bin"),
@@ -410,6 +507,8 @@ def _choose_fsdp_source(checkpoint_dir: Path) -> Path:
 def discover_checkpoints(config: EvaluationConfig) -> list[CheckpointSpec]:
     """Discover all numeric global_step directories and inspect their model format."""
 
+    if config.source_type != CHECKPOINT_SOURCE or config.training_output is None:
+        raise ValueError("Checkpoint discovery requires a checkpoint evaluation config.")
     step_directories: dict[int, Path] = {}
     for path in config.training_output.iterdir():
         match = CHECKPOINT_PATTERN.fullmatch(path.name)
@@ -563,6 +662,8 @@ def prepare_model(
         return
     if checkpoint.source_kind != "fsdp":
         raise ValueError(f"Unsupported checkpoint source kind: {checkpoint.source_kind}")
+    if config.training_output is None:
+        raise ValueError("FSDP checkpoint merging requires training_output.")
 
     temporary_root = Path(
         tempfile.mkdtemp(
@@ -889,7 +990,7 @@ def _await_messages(
     processes: Sequence[mp.Process],
     expected_kind: str,
     count: int,
-    step_num: int,
+    progress_label: str,
 ) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     last_heartbeat = time.monotonic()
@@ -901,11 +1002,11 @@ def _await_messages(
             if unexpected_exits:
                 raise RuntimeError(
                     f"GPU workers exited before all {expected_kind} messages arrived at "
-                    f"step {step_num}: {unexpected_exits}"
+                    f"{progress_label}: {unexpected_exits}"
                 )
             if time.monotonic() - last_heartbeat >= 60:
                 print(
-                    f"HEARTBEAT step={step_num} kind={expected_kind} "
+                    f"HEARTBEAT {progress_label} kind={expected_kind} "
                     f"remaining={count - len(messages)} time={utc_now()}",
                     flush=True,
                 )
@@ -915,19 +1016,19 @@ def _await_messages(
             raise RuntimeError(f"Unexpected worker message: {message}")
         if not message.get("ok"):
             raise RuntimeError(
-                f"GPU {message.get('gpu')} failed at step {step_num}: "
+                f"GPU {message.get('gpu')} failed at {progress_label}: "
                 f"{message.get('error')}\n{message.get('traceback', '')}"
             )
         messages.append(message)
         if expected_kind == "ready":
             print(
-                f"READY step={step_num} gpu={message['gpu']} "
+                f"READY {progress_label} gpu={message['gpu']} "
                 f"workers={len(messages)}/{count}",
                 flush=True,
             )
         else:
             print(
-                f"BATCH_DONE step={step_num} batch={message['batch_id']} "
+                f"BATCH_DONE {progress_label} batch={message['batch_id']} "
                 f"gpu={message['gpu']} elapsed={message['elapsed_seconds']:.1f}s "
                 f"completed={len(messages)}/{count}",
                 flush=True,
@@ -977,15 +1078,17 @@ def _worker_config(config: EvaluationConfig) -> dict[str, Any]:
     }
 
 
-def evaluate_checkpoint(
+def evaluate_model(
     *,
     config: EvaluationConfig,
-    checkpoint: CheckpointSpec,
     model_dir: Path,
     batches: Sequence[Sequence[dict[str, Any]]],
     dataset_question_counts: Mapping[str, int],
+    progress_label: str,
+    process_name_prefix: str,
+    start_event: str,
 ) -> dict[str, dict[str, dict[str, float]]]:
-    """Evaluate one checkpoint with one independent model replica per GPU."""
+    """Evaluate one loadable model with one independent full replica per GPU."""
 
     context = mp.get_context("spawn")
     job_queue = context.Queue()
@@ -995,12 +1098,12 @@ def evaluate_checkpoint(
         context.Process(
             target=_gpu_worker,
             args=(gpu_id, str(model_dir), payload, job_queue, result_queue),
-            name=f"eval-step{checkpoint.step_num}-gpu{gpu_id}",
+            name=f"{process_name_prefix}-gpu{gpu_id}",
         )
         for gpu_id in config.gpus
     ]
     print(
-        f"STEP_START run={config.run_name} step={checkpoint.step_num} "
+        f"{start_event} run={config.run_name} {progress_label} "
         f"gpus={list(config.gpus)} batches={len(batches)} "
         f"rollouts_per_gpu_call={config.rollouts_per_gpu_batch}",
         flush=True,
@@ -1014,7 +1117,7 @@ def evaluate_checkpoint(
             processes=processes,
             expected_kind="ready",
             count=len(processes),
-            step_num=checkpoint.step_num,
+            progress_label=progress_label,
         )
         for batch_id, batch in enumerate(batches):
             job_queue.put({"batch_id": batch_id, "tasks": list(batch)})
@@ -1023,7 +1126,7 @@ def evaluate_checkpoint(
             processes=processes,
             expected_kind="batch",
             count=len(batches),
-            step_num=checkpoint.step_num,
+            progress_label=progress_label,
         )
         completed = True
     finally:
@@ -1041,6 +1144,27 @@ def evaluate_checkpoint(
         dataset_order=[dataset.name for dataset in config.datasets],
         length_control=config.length_control,
         n=config.n,
+    )
+
+
+def evaluate_checkpoint(
+    *,
+    config: EvaluationConfig,
+    checkpoint: CheckpointSpec,
+    model_dir: Path,
+    batches: Sequence[Sequence[dict[str, Any]]],
+    dataset_question_counts: Mapping[str, int],
+) -> dict[str, dict[str, dict[str, float]]]:
+    """Evaluate one checkpoint through the shared loadable-model engine."""
+
+    return evaluate_model(
+        config=config,
+        model_dir=model_dir,
+        batches=batches,
+        dataset_question_counts=dataset_question_counts,
+        progress_label=f"step={checkpoint.step_num}",
+        process_name_prefix=f"eval-step{checkpoint.step_num}",
+        start_event="STEP_START",
     )
 
 
