@@ -22,6 +22,7 @@ from verl.trainer import main_ppo_sync as verl_sync
 
 SUPPORTED_LOSS_MODES = {
     "reverse_kl",
+    "sol_reverse_kl",
     "cal_reverse_kl",
     "eopd",
     "exopd_reverse_kl",
@@ -322,10 +323,14 @@ def validate_opd_runtime_config(config) -> None:
             "Teacher response_length must cover train_max_new_tokens; got "
             f"{teacher.response_length} < {train_response_tokens}."
         )
-    if int(teacher.max_model_len) < required_train_tokens:
+    required_teacher_train_tokens = (
+        int(teacher.prompt_length) + train_response_tokens + 1
+    )
+    if int(teacher.max_model_len) < required_teacher_train_tokens:
         raise ValueError(
-            "Teacher max_model_len must cover the prompt, full training response, "
-            f"and one prediction token ({required_train_tokens}); got "
+            "Teacher max_model_len must cover its configured prompt_length, the "
+            "full training response, and one prediction token "
+            f"({required_teacher_train_tokens}); got "
             f"{teacher.max_model_len}."
         )
 

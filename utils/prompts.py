@@ -61,6 +61,21 @@ You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
 """
 
 
+qwen3_privileged_solution_thinking = r"""<|im_start|>system
+You are a helpful math assistant.
+Please solve the math problem step by step clearly and concisely.
+You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
+<|im_start|>user
+{question}
+
+A reference solution is provided as additional guidance:
+{privileged_solution}
+
+Use it while independently providing a complete and logically coherent solution.<|im_end|>
+<|im_start|>assistant
+"""
+
+
 qwen3_positive_privileged_feedback_thinking = r"""<|im_start|>system
 You are a helpful math assistant.
 Please solve the math problem step by step clearly and concisely.
@@ -162,6 +177,7 @@ PROMPT_TEMPLATES = {
     "qwen3_no_thinking_prompt": qwen3_no_thinking_prompt,
     "qwen3_thinking_with_answer_prompt": qwen3_thinking_with_answer_prompt,
     "qwen3_no_thinking_with_answer_prompt": qwen3_no_thinking_with_answer_prompt,
+    "qwen3_privileged_solution_thinking": qwen3_privileged_solution_thinking,
     "qwen3_positive_privileged_feedback_thinking": qwen3_positive_privileged_feedback_thinking,
     "qwen3_positive_privileged_feedback_no_thinking": qwen3_positive_privileged_feedback_no_thinking,
     "qwen3_negative_privileged_feedback_thinking": qwen3_negative_privileged_feedback_thinking,
@@ -173,6 +189,11 @@ PROMPT_TEMPLATES = {
 PRI_PRIVILEGED_PROMPTS = {
     "qwen3_thinking_prompt": "qwen3_thinking_with_answer_prompt",
     "qwen3_no_thinking_prompt": "qwen3_no_thinking_with_answer_prompt",
+}
+
+
+SOL_PRIVILEGED_PROMPTS = {
+    "qwen3_thinking_prompt": "qwen3_privileged_solution_thinking",
 }
 
 
@@ -223,12 +244,26 @@ def get_pri_privileged_prompt_name(student_prompt_name: str) -> str:
         ) from exc
 
 
+def get_sol_privileged_prompt_name(student_prompt_name: str) -> str:
+    """Return the solution-privileged Teacher prompt for a Student mode."""
+
+    try:
+        return SOL_PRIVILEGED_PROMPTS[student_prompt_name]
+    except KeyError as exc:
+        supported = ", ".join(sorted(SOL_PRIVILEGED_PROMPTS))
+        raise ValueError(
+            "Sol-OPD currently requires the Qwen3 thinking Student prompt; "
+            f"got {student_prompt_name!r}, expected one of: {supported}."
+        ) from exc
+
+
 def render_prompt(
     name: str,
     *,
     question: str,
     answer: str = "",
     ground_answer: str | None = None,
+    privileged_solution: str = "",
 ) -> str:
     """Render a registered prompt without applying another chat template."""
     if ground_answer is None:
@@ -237,4 +272,5 @@ def render_prompt(
         question=question,
         answer=answer,
         ground_answer=ground_answer,
+        privileged_solution=privileged_solution,
     )

@@ -139,6 +139,20 @@ class AsyncTeacherLLMServerManager:
         config: DictConfig,
         teacher_client: dict[str, LLMServerClient],
     ):
+        # ``DistillationTeacherModelConfig.validate_and_prepare_for_distillation``
+        # rewrites inference.prompt_length to prompt_length + response_length so
+        # the Teacher server can consume the complete sequence as a prefill.  Keep
+        # the user-configured prompt capacities before that conversion: Sol-OPD
+        # needs the routed Teacher's *prompt-only* limit when it constructs the
+        # longer solution-privileged prompt.
+        raw_teacher_prompt_configs: dict[str, tuple[Optional[str], int]] = {}
+        for entry_name, teacher_config in config.distillation.teacher_models.items():
+            raw_routing_key = teacher_config.get("key")
+            raw_teacher_prompt_configs[str(entry_name)] = (
+                str(raw_routing_key) if raw_routing_key is not None else None,
+                int(teacher_config.inference.prompt_length),
+            )
+
         self.distillation_config: DistillationConfig = omega_conf_to_dataclass(config.distillation)
         self.distillation_loss_config: DistillationLossConfig = self.distillation_config.distillation_loss
         self.teacher_key: str = self.distillation_config.teacher_key
@@ -151,6 +165,36 @@ class AsyncTeacherLLMServerManager:
                 f"do not match teacher routing keys {sorted(expected)}."
             )
         self.teacher_client: dict[str, LLMServerClient] = teacher_client
+
+        if len(self.teacher_model_configs) == 1:
+            resolved_key = next(iter(self.teacher_model_configs))
+            try:
+                prompt_length = raw_teacher_prompt_configs["teacher_model"][1]
+            except KeyError as exc:
+                raise ValueError(
+                    "Single-teacher distillation requires the teacher_model configuration entry."
+                ) from exc
+            self._teacher_prompt_lengths = {resolved_key: prompt_length}
+        else:
+            self._teacher_prompt_lengths = {
+                routing_key: prompt_length
+                for entry_name, (routing_key, prompt_length) in raw_teacher_prompt_configs.items()
+                if entry_name != "teacher_model" and routing_key is not None
+            }
+        if set(self._teacher_prompt_lengths) != expected:
+            raise ValueError(
+                "Could not associate every routed Teacher with its configured prompt length: "
+                f"length keys={sorted(self._teacher_prompt_lengths)}, "
+                f"teacher keys={sorted(expected)}."
+            )
+        invalid_prompt_lengths = {
+            key: value for key, value in self._teacher_prompt_lengths.items() if value <= 0
+        }
+        if invalid_prompt_lengths:
+            raise ValueError(
+                "Teacher prompt lengths must be positive, got "
+                f"{invalid_prompt_lengths}."
+            )
 
     def _resolve_teacher_key(self, routing_key: Optional[str]) -> str:
         if len(self.teacher_model_configs) == 1:
@@ -167,6 +211,12 @@ class AsyncTeacherLLMServerManager:
                 f"Configured teachers: {sorted(self.teacher_model_configs)}."
             )
         return routing_key
+
+    def get_teacher_prompt_length(self, routing_key: Optional[str] = None) -> int:
+        """Return the routed Teacher's configured prompt-only capacity."""
+
+        teacher_key = self._resolve_teacher_key(routing_key)
+        return self._teacher_prompt_lengths[teacher_key]
 
     async def compute_answer_probe_mean_logprob_single(
         self,
@@ -280,6 +330,7 @@ class AsyncTeacherLLMServerManager:
         multi_modal_data: Optional[dict[str, Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         routing_key: Optional[str] = None,
+        sampled_only: bool = False,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -292,21 +343,57 @@ class AsyncTeacherLLMServerManager:
         """Compute teacher log probabilities for a single unpadded sequence."""
         multi_modal_data = multi_modal_data or {}
         teacher_key = self._resolve_teacher_key(routing_key)
+        if response_length <= 0 or len(sequence_ids) <= response_length:
+            raise ValueError(
+                "Teacher scoring requires at least one prompt token and one response token; "
+                f"got sequence_length={len(sequence_ids)}, response_length={response_length}."
+            )
+        # A few focused alignment tests construct the manager via ``__new__``
+        # to exercise extraction without a full runtime config.  Production
+        # construction always initializes this map and therefore always enforces
+        # the routed prompt capacity.
+        if hasattr(self, "_teacher_prompt_lengths"):
+            teacher_prompt_length = len(sequence_ids) - response_length
+            max_teacher_prompt_length = self.get_teacher_prompt_length(teacher_key)
+            if teacher_prompt_length > max_teacher_prompt_length:
+                raise ValueError(
+                    "Teacher prompt exceeds its configured prompt-only capacity: "
+                    f"{teacher_prompt_length} > {max_teacher_prompt_length} "
+                    f"for routing key {teacher_key!r}."
+                )
         teacher_model_config = self.teacher_model_configs[teacher_key]
         client = self.teacher_client[teacher_key]
+        loss_settings = self.distillation_loss_config.loss_settings
+        if sampled_only and (
+            not getattr(loss_settings, "use_estimator", False)
+            or getattr(loss_settings, "use_topk", False)
+            or getattr(loss_settings, "use_full_vocab_teacher_entropy", False)
+        ):
+            raise ValueError(
+                "sampled_only Teacher scoring is valid only for estimator-based "
+                "distillation losses without Top-k or full-vocabulary entropy."
+            )
         extra_generate_kwargs = {}
-        if getattr(
-            self.distillation_loss_config.loss_settings,
+        if not sampled_only and getattr(
+            loss_settings,
             "use_full_vocab_teacher_entropy",
             False,
         ):
             extra_generate_kwargs["prompt_logprobs_topk"] = int(
                 self.distillation_loss_config.topk
             )
+        sampling_params = _get_teacher_sampling_params(
+            teacher_model_config, self.distillation_loss_config
+        )
+        if sampled_only:
+            # Ask the server only for the observed token's log probability at
+            # each causal position.  Sol-OPD's second Teacher forward is purely
+            # an A_opd baseline and does not consume Top-k diagnostics.
+            sampling_params["prompt_logprobs"] = 0
         teacher_output = await client.generate(
             request_id=uuid4().hex,
             prompt_ids=sequence_ids,
-            sampling_params=_get_teacher_sampling_params(teacher_model_config, self.distillation_loss_config),
+            sampling_params=sampling_params,
             image_data=multi_modal_data.get("images"),
             video_data=multi_modal_data.get("videos"),
             audio_data=multi_modal_data.get("audios"),
@@ -317,20 +404,24 @@ class AsyncTeacherLLMServerManager:
         # sequence length. Each row predicts the following token, and the last row is dummy.
         diagnostic_ids = torch.tensor(teacher_output.extra_fields["prompt_ids"], dtype=torch.int32)
         diagnostic_logprobs = torch.tensor(teacher_output.extra_fields["prompt_logprobs"])
-        sampled_ids = torch.tensor(
-            teacher_output.extra_fields["prompt_sampled_ids"], dtype=torch.int32
-        )
-        sampled_logprobs = torch.tensor(
-            teacher_output.extra_fields["prompt_sampled_logprobs"]
-        )
+        if sampled_only:
+            sampled_ids = diagnostic_ids
+            sampled_logprobs = diagnostic_logprobs
+        else:
+            sampled_ids = torch.tensor(
+                teacher_output.extra_fields["prompt_sampled_ids"], dtype=torch.int32
+            )
+            sampled_logprobs = torch.tensor(
+                teacher_output.extra_fields["prompt_sampled_logprobs"]
+            )
         teacher_entropy = None
-        if getattr(
-            self.distillation_loss_config.loss_settings,
+        if not sampled_only and getattr(
+            loss_settings,
             "use_full_vocab_teacher_entropy",
             False,
         ):
             teacher_entropy = torch.tensor(teacher_output.extra_fields["prompt_entropies"])
-        if self.distillation_loss_config.loss_settings.use_topk:
+        if loss_settings.use_topk:
             teacher_ids = diagnostic_ids
             teacher_logprobs = diagnostic_logprobs
         else:

@@ -86,6 +86,8 @@ class DistillationLossConfig(BaseConfig):
     # Statistics-only dead zone for classifying standard OPD advantages as
     # positive or negative. It never changes the training signal.
     opd_statistics_threshold: float = 1.0e-4
+    # Numerical dead zone used only by Sol-OPD comparison diagnostics.
+    sol_opd_epsilon: float = 1.0e-6
     sensitivity_stats_dir: Optional[str] = None
     use_task_rewards: bool = False
     distillation_loss_coef: float = 1.0
@@ -173,6 +175,11 @@ class DistillationLossConfig(BaseConfig):
                 "opd_statistics_threshold must be non-negative, got "
                 f"{self.opd_statistics_threshold}."
             )
+        if not math.isfinite(self.sol_opd_epsilon) or self.sol_opd_epsilon <= 0:
+            raise ValueError(
+                "sol_opd_epsilon must be finite and positive, got "
+                f"{self.sol_opd_epsilon}."
+            )
         if self.policy_loss_mode not in {"vanilla", "reinforce"}:
             raise NotImplementedError(
                 f"Only vanilla and reinforce policy losses are supported when use_policy_gradient is True, "
@@ -182,6 +189,7 @@ class DistillationLossConfig(BaseConfig):
         if not self.use_policy_gradient and self.loss_mode in {
             "k1",
             "reverse_kl",
+            "sol_reverse_kl",
             "cal_reverse_kl",
             "eopd",
             "exopd_reverse_kl",

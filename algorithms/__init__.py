@@ -28,6 +28,9 @@ ALGORITHM_REGISTRY: dict[str, AlgorithmRegistration] = {
     "pri_opd": AlgorithmRegistration(
         "algorithms.pri_opd", "PriOPDTrainer", "validate_pri_opd_config"
     ),
+    "sol_opd": AlgorithmRegistration(
+        "algorithms.sol_opd", "SolOPDTrainer", "validate_sol_opd_config"
+    ),
     "gkd_opd": AlgorithmRegistration(
         "algorithms.gkd_opd", "GKDOPDTrainer", "validate_gkd_opd_config"
     ),

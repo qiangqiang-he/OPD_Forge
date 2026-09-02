@@ -76,6 +76,94 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 DEFAULT_ROUTING_CACHE_SIZE = 10000
 
 
+def _tokenize_solution_privileged_prompt(
+    tokenizer,
+    *,
+    prompt_name: str,
+    question: str,
+    privileged_solution: str,
+    max_prompt_length: int,
+) -> list[int]:
+    """Render a Sol-OPD prompt, truncating only the solution from the left.
+
+    The complete prompt is re-tokenized for every candidate suffix.  This is
+    intentional: tokenizing independently rendered fragments and concatenating
+    them is not generally equivalent to tokenizing the final prompt.  The fixed
+    template, complete question, and assistant generation boundary are therefore
+    never sliced at token level.
+    """
+
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("Sol-OPD requires a non-empty question string.")
+    if not isinstance(privileged_solution, str) or not privileged_solution.strip():
+        raise ValueError("Sol-OPD requires a non-empty privileged solution string.")
+    if max_prompt_length <= 0:
+        raise ValueError(
+            f"Sol-OPD Teacher max_prompt_length must be positive, got {max_prompt_length}."
+        )
+
+    from utils.prompts import render_prompt
+
+    def render_and_tokenize(solution_suffix: str) -> list[int]:
+        prompt_text = render_prompt(
+            prompt_name,
+            question=question,
+            privileged_solution=solution_suffix,
+        )
+        return normalize_token_ids(
+            tokenizer.encode(prompt_text, add_special_tokens=False)
+        )
+
+    full_prompt_ids = render_and_tokenize(privileged_solution)
+    if len(full_prompt_ids) <= max_prompt_length:
+        return full_prompt_ids
+
+    # An empty solution is the smallest structurally valid rendering.  If that
+    # cannot fit, preserving the complete question and template is impossible,
+    # so fail closed instead of silently truncating either one.
+    empty_solution_prompt_ids = render_and_tokenize("")
+    if len(empty_solution_prompt_ids) > max_prompt_length:
+        raise RuntimeError(
+            "Sol-OPD prompt cannot fit within the routed Teacher prompt capacity "
+            "without truncating the template or question: "
+            f"empty-solution prompt length={len(empty_solution_prompt_ids)}, "
+            f"capacity={max_prompt_length}."
+        )
+
+    # Keep the longest suffix found by a logarithmic search over character
+    # boundaries.  Python slicing is Unicode-safe, and retaining the tail keeps
+    # the derivation conclusion/final answer that math solutions usually place
+    # at the end.
+    low, high = 1, len(privileged_solution)
+    retained_characters = 0
+    truncated_prompt_ids: Optional[list[int]] = None
+    while low <= high:
+        candidate_length = (low + high) // 2
+        candidate_ids = render_and_tokenize(
+            privileged_solution[-candidate_length:]
+        )
+        if len(candidate_ids) <= max_prompt_length:
+            retained_characters = candidate_length
+            truncated_prompt_ids = candidate_ids
+            low = candidate_length + 1
+        else:
+            high = candidate_length - 1
+
+    if truncated_prompt_ids is None:
+        raise RuntimeError(
+            "Sol-OPD Teacher prompt capacity leaves no room for any privileged "
+            "solution content while preserving the template and question."
+        )
+    logger.warning(
+        "Sol-OPD privileged prompt exceeded %d tokens; removed %d leading "
+        "solution characters and retained the final %d characters.",
+        max_prompt_length,
+        len(privileged_solution) - retained_characters,
+        retained_characters,
+    )
+    return truncated_prompt_ids
+
+
 def _compute_topk_overlap_metrics(
     student_ids: torch.Tensor,
     student_logprobs: torch.Tensor,
@@ -175,6 +263,14 @@ class AgentLoopOutput(BaseModel):
         output["extra_fields"].pop("privileged_teacher_ids", None)
         if privileged_teacher_logprobs is not None:
             output["privileged_teacher_logprobs"] = privileged_teacher_logprobs
+        sol_unprivileged_teacher_logprobs = output["extra_fields"].pop(
+            "sol_unprivileged_teacher_logprobs", None
+        )
+        output["extra_fields"].pop("sol_unprivileged_teacher_ids", None)
+        if sol_unprivileged_teacher_logprobs is not None:
+            output["sol_unprivileged_teacher_logprobs"] = (
+                sol_unprivileged_teacher_logprobs
+            )
         for field_name in (
             "cal_positive_teacher_logprobs",
             "cal_negative_teacher_logprobs",
@@ -231,6 +327,8 @@ class _InternalAgentLoopOutput(AgentLoopOutput):
     """Padded full-vocabulary Teacher entropy for each response position."""
     privileged_teacher_logprobs: Optional[torch.Tensor] = None
     """Padded teacher log probabilities under the PS-OPD privileged prompt."""
+    sol_unprivileged_teacher_logprobs: Optional[torch.Tensor] = None
+    """Padded Teacher log probabilities without Sol-OPD solution privilege."""
     cal_positive_teacher_logprobs: Optional[torch.Tensor] = None
     """Padded teacher log probabilities under Cal-OPD positive feedback."""
     cal_negative_teacher_logprobs: Optional[torch.Tensor] = None
@@ -847,6 +945,12 @@ class AgentLoopWorker:
         )
         teacher_entropy = output.extra_fields.pop("teacher_entropy", None)
         privileged_teacher_logprobs = output.extra_fields.pop("privileged_teacher_logprobs", None)
+        sol_unprivileged_teacher_ids = output.extra_fields.pop(
+            "sol_unprivileged_teacher_ids", None
+        )
+        sol_unprivileged_teacher_logprobs = output.extra_fields.pop(
+            "sol_unprivileged_teacher_logprobs", None
+        )
         cal_positive_teacher_logprobs = output.extra_fields.pop("cal_positive_teacher_logprobs", None)
         cal_negative_teacher_logprobs = output.extra_fields.pop("cal_negative_teacher_logprobs", None)
         teacher_max_logprobs = output.extra_fields.pop("teacher_max_logprobs", None)
@@ -886,6 +990,20 @@ class AgentLoopWorker:
                 _, privileged_teacher_logprobs = _pad_teacher_outputs(
                     teacher_ids=output.extra_fields.pop("privileged_teacher_ids"),
                     teacher_logprobs=privileged_teacher_logprobs,
+                    prompt_width=prompt_output["input_ids"].shape[1],
+                    response_width=response_output["input_ids"].shape[1],
+                    prompt_length=len(output.prompt_ids),
+                    response_length=len(output.response_ids),
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
+            if sol_unprivileged_teacher_logprobs is not None:
+                if sol_unprivileged_teacher_ids is None:
+                    raise RuntimeError(
+                        "Sol-OPD unprivileged Teacher logprobs are missing their aligned token IDs."
+                    )
+                _, sol_unprivileged_teacher_logprobs = _pad_teacher_outputs(
+                    teacher_ids=sol_unprivileged_teacher_ids,
+                    teacher_logprobs=sol_unprivileged_teacher_logprobs,
                     prompt_width=prompt_output["input_ids"].shape[1],
                     response_width=response_output["input_ids"].shape[1],
                     prompt_length=len(output.prompt_ids),
@@ -962,6 +1080,7 @@ class AgentLoopWorker:
             teacher_sampled_logprobs=teacher_sampled_logprobs,
             teacher_entropy=teacher_entropy,
             privileged_teacher_logprobs=privileged_teacher_logprobs,
+            sol_unprivileged_teacher_logprobs=sol_unprivileged_teacher_logprobs,
             cal_positive_teacher_logprobs=cal_positive_teacher_logprobs,
             cal_negative_teacher_logprobs=cal_negative_teacher_logprobs,
             teacher_max_logprobs=teacher_max_logprobs,
@@ -1135,8 +1254,62 @@ class AgentLoopWorker:
             teacher_prompt_text = sample_kwargs["teacher_prompt_text"]
             if hasattr(teacher_prompt_text, "item"):
                 teacher_prompt_text = teacher_prompt_text.item()
-            teacher_prompt_ids = await self.tokenize_preformatted_prompt(str(teacher_prompt_text))
 
+            algorithm_name = str(self.config.algorithm.get("name", ""))
+            is_sol_opd = algorithm_name == "sol_opd"
+            is_ps_opd = algorithm_name == "ps_opd"
+            is_cal_opd = algorithm_name == "cal_opd"
+            is_oa_opd = algorithm_name == "oa_opd"
+            is_fast_oa_opd = algorithm_name == "fast_oa_opd"
+
+            sol_unprivileged_teacher_prompt_ids = None
+            if is_sol_opd:
+
+                def _python_scalar(value):
+                    return value.item() if hasattr(value, "item") else value
+
+                question_value = _python_scalar(
+                    sample_kwargs.get("sol_question", "")
+                )
+                solution_value = _python_scalar(
+                    sample_kwargs.get("sol_privileged_solution", "")
+                )
+                question = "" if question_value is None else str(question_value)
+                privileged_solution = (
+                    "" if solution_value is None else str(solution_value)
+                )
+                if not question.strip() or not privileged_solution.strip():
+                    raise RuntimeError(
+                        "Sol-OPD training requires non-empty sol_question and "
+                        "sol_privileged_solution fields."
+                    )
+
+                teacher_prompt_length = (
+                    self.teacher_server_manager.get_teacher_prompt_length(routing_key)
+                )
+                teacher_prompt_ids = _tokenize_solution_privileged_prompt(
+                    self.tokenizer,
+                    prompt_name=str(self.config.teacher_prompt),
+                    question=question,
+                    privileged_solution=privileged_solution,
+                    max_prompt_length=teacher_prompt_length,
+                )
+                # Standard OPD scores the original Student rollout under its
+                # original, unprivileged prompt.  Reuse those exact prompt IDs;
+                # do not reconstruct them from decoded text.
+                sol_unprivileged_teacher_prompt_ids = list(prompt_ids)
+                if len(sol_unprivileged_teacher_prompt_ids) > teacher_prompt_length:
+                    raise RuntimeError(
+                        "Sol-OPD unprivileged prompt exceeds the routed Teacher "
+                        f"prompt capacity: {len(sol_unprivileged_teacher_prompt_ids)} "
+                        f"> {teacher_prompt_length}."
+                    )
+            else:
+                teacher_prompt_ids = await self.tokenize_preformatted_prompt(
+                    str(teacher_prompt_text)
+                )
+
+            scored_response_ids = list(response_ids)
             timing = {}
             with simple_timer("teacher_forward_s", timing):
                 (
@@ -1149,20 +1322,63 @@ class AgentLoopWorker:
                     teacher_timing,
                 ) = (
                     await self.teacher_server_manager.compute_teacher_logprobs_single(
-                        sequence_ids=teacher_prompt_ids + response_ids,
+                        sequence_ids=teacher_prompt_ids + scored_response_ids,
                         student_prompt_length=len(prompt_ids),
-                        response_length=len(response_ids),
+                        response_length=len(scored_response_ids),
                         multi_modal_data=output.multi_modal_data,
                         mm_processor_kwargs=output.mm_processor_kwargs,
                         routing_key=routing_key,
                     )
                 )
 
-            algorithm_name = str(self.config.algorithm.get("name", ""))
-            is_ps_opd = algorithm_name == "ps_opd"
-            is_cal_opd = algorithm_name == "cal_opd"
-            is_oa_opd = algorithm_name == "oa_opd"
-            is_fast_oa_opd = algorithm_name == "fast_oa_opd"
+            if is_sol_opd:
+                # Both forwards append the same immutable Student response IDs.
+                # Only the prompt differs; the solution-conditioned result stays
+                # in the ordinary teacher_logprobs field and drives training.
+                with simple_timer("sol_unprivileged_teacher_forward_s", timing):
+                    (
+                        sol_unprivileged_teacher_ids,
+                        sol_unprivileged_teacher_logprobs,
+                        _,
+                        _,
+                        _,
+                        _,
+                        sol_unprivileged_teacher_timing,
+                    ) = await self.teacher_server_manager.compute_teacher_logprobs_single(
+                        sequence_ids=(
+                            sol_unprivileged_teacher_prompt_ids
+                            + scored_response_ids
+                        ),
+                        student_prompt_length=len(prompt_ids),
+                        response_length=len(scored_response_ids),
+                        multi_modal_data=output.multi_modal_data,
+                        mm_processor_kwargs=output.mm_processor_kwargs,
+                        routing_key=routing_key,
+                        sampled_only=True,
+                    )
+                if not torch.equal(
+                    sol_unprivileged_teacher_ids.cpu(), teacher_ids.cpu()
+                ):
+                    raise RuntimeError(
+                        "Sol-OPD dual-Teacher alignment invariant failed: the solution "
+                        "and unprivileged forwards did not score identical Student "
+                        "response token IDs."
+                    )
+                output.extra_fields["sol_unprivileged_teacher_ids"] = (
+                    sol_unprivileged_teacher_ids
+                )
+                output.extra_fields["sol_unprivileged_teacher_logprobs"] = (
+                    sol_unprivileged_teacher_logprobs
+                )
+                output.extra_fields["sol_unprivileged_teacher_forward_s"] = timing[
+                    "sol_unprivileged_teacher_forward_s"
+                ]
+                output.extra_fields.update(
+                    {
+                        f"sol_unprivileged_{key}": value
+                        for key, value in sol_unprivileged_teacher_timing.items()
+                    }
+                )
             if is_oa_opd or is_fast_oa_opd:
                 if sample_kwargs is None:
                     raise RuntimeError("OA-OPD requires rollout answer metadata.")
@@ -1431,6 +1647,10 @@ class AgentLoopWorker:
         if inputs[0].privileged_teacher_logprobs is not None:
             optional_outputs["privileged_teacher_logprobs"] = torch.cat(
                 [input.privileged_teacher_logprobs for input in inputs], dim=0
+            )
+        if inputs[0].sol_unprivileged_teacher_logprobs is not None:
+            optional_outputs["sol_unprivileged_teacher_logprobs"] = torch.cat(
+                [input.sol_unprivileged_teacher_logprobs for input in inputs], dim=0
             )
         if inputs[0].cal_positive_teacher_logprobs is not None:
             optional_outputs["cal_positive_teacher_logprobs"] = torch.cat(

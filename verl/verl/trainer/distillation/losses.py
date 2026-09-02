@@ -790,6 +790,313 @@ def compute_sampled_token_reverse_kl(
     return selected_reverse_kl, metrics
 
 
+def compute_sol_opd_comparison_statistics(
+    opd_advantage: torch.Tensor,
+    sol_advantage: torch.Tensor,
+    response_mask: torch.Tensor,
+    *,
+    epsilon: float = 1.0e-6,
+) -> dict[str, Metric]:
+    """Return aggregatable raw-advantage statistics for Sol-OPD.
+
+    Token-pooled ratios are represented by separate sums/counts so they can be
+    combined exactly across micro-batches and data-parallel ranks. Rollout
+    statistics are reduced within each trajectory first and materialized as a
+    sum plus a rollout count for the same reason. Headline magnitude rates use
+    strict comparisons over every valid token. ``same_direction_*`` rates are
+    conditional on both advantages having magnitude greater than ``epsilon``
+    and having the same sign. The exhaustive ``category_*`` rates remain
+    unconditional over all valid tokens.
+    """
+
+    if (
+        opd_advantage.ndim != 2
+        or sol_advantage.ndim != 2
+        or response_mask.ndim != 2
+    ):
+        raise ValueError("Sol-OPD comparison tensors must all be two-dimensional.")
+    if not (
+        opd_advantage.shape == sol_advantage.shape == response_mask.shape
+    ):
+        raise ValueError("Sol-OPD comparison tensors must have identical shapes.")
+    if not math.isfinite(float(epsilon)) or float(epsilon) <= 0.0:
+        raise ValueError(f"Sol-OPD epsilon must be finite and positive, got {epsilon}.")
+
+    values_opd = opd_advantage.float()
+    values_sol = sol_advantage.float()
+    valid = response_mask.bool()
+    if not bool(torch.isfinite(values_opd[valid]).all()) or not bool(
+        torch.isfinite(values_sol[valid]).all()
+    ):
+        raise ValueError("Sol-OPD advantages must be finite on valid response tokens.")
+
+    eps = float(epsilon)
+    abs_opd = values_opd.abs()
+    abs_sol = values_sol.abs()
+    magnitude_delta = abs_sol - abs_opd
+
+    # Keep the three headline magnitude rates faithful to their literal
+    # definitions.  In particular, ``equal`` means exact equality here; the
+    # epsilon dead zone belongs to sign reliability and to the separate
+    # approximately-unchanged category below.
+    amplified = valid & abs_sol.gt(abs_opd)
+    reduced = valid & abs_sol.lt(abs_opd)
+    equal = valid & abs_sol.eq(abs_opd)
+
+    both_active = valid & abs_opd.gt(eps) & abs_sol.gt(eps)
+    sign_flipped = both_active & values_opd.mul(values_sol).lt(0.0)
+    same_direction_eligible = both_active & ~sign_flipped
+    same_direction_amplified = same_direction_eligible & amplified
+    same_direction_reduced = same_direction_eligible & reduced
+
+    # These four masks are mutually exclusive and exhaustive. Near-zero sign
+    # transitions are intentionally treated as non-flips. Tiny magnitude
+    # changes (including those involving a near-zero advantage) go into the
+    # approximately-unchanged bucket rather than the strict headline rates.
+    category_sign_flipped = sign_flipped
+    category_amplified = (
+        valid & ~category_sign_flipped & magnitude_delta.gt(eps)
+    )
+    category_reduced = (
+        valid & ~category_sign_flipped & magnitude_delta.lt(-eps)
+    )
+    category_unchanged = valid & ~(
+        category_sign_flipped | category_amplified | category_reduced
+    )
+
+    token_counts = valid.sum(dim=-1)
+    valid_rollouts = token_counts.gt(0)
+    token_denominators = token_counts.clamp_min(1).float()
+    same_direction_counts = same_direction_eligible.sum(dim=-1)
+    same_direction_rollouts = same_direction_counts.gt(0)
+    same_direction_denominators = same_direction_counts.clamp_min(1).float()
+
+    def rollout_rate_sum(
+        selection: torch.Tensor,
+        *,
+        denominators: torch.Tensor = token_denominators,
+        included_rollouts: torch.Tensor = valid_rollouts,
+    ) -> torch.Tensor:
+        rates = selection.sum(dim=-1).float() / denominators
+        return rates[included_rollouts].sum()
+
+    opd_abs_by_rollout = (abs_opd * valid).sum(dim=-1)
+    sol_abs_by_rollout = (abs_sol * valid).sum(dim=-1)
+    deviation_abs_by_rollout = ((values_sol - values_opd).abs() * valid).sum(
+        dim=-1
+    )
+    ratio_rollouts = valid_rollouts & opd_abs_by_rollout.gt(eps)
+
+    def sum_metric(value: torch.Tensor) -> Metric:
+        return Metric(AggregationType.SUM, value)
+
+    stats_prefix = "distillation/sol_stats/"
+    return {
+        f"{stats_prefix}token_count": sum_metric(valid.float().sum()),
+        f"{stats_prefix}rollout_count": sum_metric(valid_rollouts.float().sum()),
+        f"{stats_prefix}ratio_rollout_count": sum_metric(
+            ratio_rollouts.float().sum()
+        ),
+        f"{stats_prefix}same_direction_token_count": sum_metric(
+            same_direction_eligible.float().sum()
+        ),
+        f"{stats_prefix}same_direction_rollout_count": sum_metric(
+            same_direction_rollouts.float().sum()
+        ),
+        f"{stats_prefix}opd_advantage_sum": sum_metric(values_opd[valid].sum()),
+        f"{stats_prefix}sol_advantage_sum": sum_metric(values_sol[valid].sum()),
+        f"{stats_prefix}opd_abs_sum": sum_metric(abs_opd[valid].sum()),
+        f"{stats_prefix}sol_abs_sum": sum_metric(abs_sol[valid].sum()),
+        f"{stats_prefix}deviation_abs_sum": sum_metric(
+            (values_sol - values_opd)[valid].abs().sum()
+        ),
+        f"{stats_prefix}amplified_count": sum_metric(amplified.float().sum()),
+        f"{stats_prefix}reduced_count": sum_metric(reduced.float().sum()),
+        f"{stats_prefix}equal_count": sum_metric(equal.float().sum()),
+        f"{stats_prefix}same_direction_amplified_count": sum_metric(
+            same_direction_amplified.float().sum()
+        ),
+        f"{stats_prefix}same_direction_reduced_count": sum_metric(
+            same_direction_reduced.float().sum()
+        ),
+        f"{stats_prefix}sign_flipped_count": sum_metric(
+            sign_flipped.float().sum()
+        ),
+        f"{stats_prefix}category_amplified_count": sum_metric(
+            category_amplified.float().sum()
+        ),
+        f"{stats_prefix}category_reduced_count": sum_metric(
+            category_reduced.float().sum()
+        ),
+        f"{stats_prefix}category_sign_flipped_count": sum_metric(
+            category_sign_flipped.float().sum()
+        ),
+        f"{stats_prefix}category_unchanged_count": sum_metric(
+            category_unchanged.float().sum()
+        ),
+        f"{stats_prefix}rollout_magnitude_ratio_sum": sum_metric(
+            (sol_abs_by_rollout[ratio_rollouts] / opd_abs_by_rollout[ratio_rollouts]).sum()
+        ),
+        f"{stats_prefix}rollout_deviation_ratio_sum": sum_metric(
+            (
+                deviation_abs_by_rollout[ratio_rollouts]
+                / opd_abs_by_rollout[ratio_rollouts]
+            ).sum()
+        ),
+        f"{stats_prefix}rollout_amplification_rate_sum": sum_metric(
+            rollout_rate_sum(amplified)
+        ),
+        f"{stats_prefix}rollout_reduction_rate_sum": sum_metric(
+            rollout_rate_sum(reduced)
+        ),
+        f"{stats_prefix}rollout_equal_rate_sum": sum_metric(
+            rollout_rate_sum(equal)
+        ),
+        f"{stats_prefix}rollout_same_direction_amplification_rate_sum": sum_metric(
+            rollout_rate_sum(
+                same_direction_amplified,
+                denominators=same_direction_denominators,
+                included_rollouts=same_direction_rollouts,
+            )
+        ),
+        f"{stats_prefix}rollout_same_direction_reduction_rate_sum": sum_metric(
+            rollout_rate_sum(
+                same_direction_reduced,
+                denominators=same_direction_denominators,
+                included_rollouts=same_direction_rollouts,
+            )
+        ),
+        f"{stats_prefix}rollout_sign_flip_rate_sum": sum_metric(
+            rollout_rate_sum(sign_flipped)
+        ),
+        f"{stats_prefix}rollout_category_amplified_rate_sum": sum_metric(
+            rollout_rate_sum(category_amplified)
+        ),
+        f"{stats_prefix}rollout_category_reduced_rate_sum": sum_metric(
+            rollout_rate_sum(category_reduced)
+        ),
+        f"{stats_prefix}rollout_category_sign_flipped_rate_sum": sum_metric(
+            rollout_rate_sum(category_sign_flipped)
+        ),
+        f"{stats_prefix}rollout_category_unchanged_rate_sum": sum_metric(
+            rollout_rate_sum(category_unchanged)
+        ),
+    }
+
+
+@register_distillation_loss(
+    DistillationLossSettings(names=["sol_reverse_kl"], use_estimator=True)  # type: ignore[arg-type]
+)
+def compute_solution_privileged_reverse_kl(
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
+    model_output: dict,
+    data: TensorDict,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Return ``log p_student - log p_solution_teacher`` for Sol-OPD."""
+
+    del config
+    if "sol_unprivileged_teacher_logprobs" not in data:
+        raise RuntimeError(
+            "Sol-OPD requires the statistics-only unprivileged Teacher forward; "
+            "actor input is missing sol_unprivileged_teacher_logprobs."
+        )
+    student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
+    solution_teacher_log_probs = no_padding_2_padding(
+        data["teacher_logprobs"], data
+    ).squeeze(-1)
+    unprivileged_teacher_log_probs = no_padding_2_padding(
+        data["sol_unprivileged_teacher_logprobs"], data
+    ).squeeze(-1)
+    if data["response_mask"].is_nested:
+        valid = data["response_mask"].bool().to_padded_tensor(False)
+    else:
+        valid = data["response_mask"].bool()
+    if not (
+        student_log_probs.shape
+        == solution_teacher_log_probs.shape
+        == unprivileged_teacher_log_probs.shape
+        == valid.shape
+    ):
+        raise ValueError(
+            "Sol-OPD Student, solution-Teacher, unprivileged-Teacher, and mask "
+            "tensors must have identical shapes."
+        )
+
+    loss_config = distillation_config.distillation_loss
+    solution_reverse_kl = student_log_probs - solution_teacher_log_probs
+    selected_mask = select_opd_reverse_kl_tokens(
+        solution_reverse_kl,
+        valid,
+        selection_ratio=float(loss_config.selection_ratio),
+        selection_method=str(loss_config.selection_method),
+    )
+    selected_reverse_kl = solution_reverse_kl * selected_mask.to(
+        solution_reverse_kl.dtype
+    )
+
+    with torch.no_grad():
+        opd_advantage = unprivileged_teacher_log_probs - student_log_probs
+        sol_advantage = solution_teacher_log_probs - student_log_probs
+        metrics = compute_sol_opd_comparison_statistics(
+            opd_advantage,
+            sol_advantage,
+            valid,
+            epsilon=float(loss_config.sol_opd_epsilon),
+        )
+        valid_student = student_log_probs[valid].float()
+        valid_solution_teacher = solution_teacher_log_probs[valid].float()
+        valid_unprivileged_teacher = unprivileged_teacher_log_probs[valid].float()
+        valid_gap = solution_reverse_kl[valid].float().abs()
+        selected_gap = solution_reverse_kl[selected_mask].float().abs()
+        base_signal = solution_reverse_kl
+        if loss_config.loss_max_clamp is not None:
+            base_signal = base_signal.clamp(
+                min=-loss_config.loss_max_clamp,
+                max=loss_config.loss_max_clamp,
+            )
+        valid_base_signal = base_signal[valid].float()
+        valid_selected_signal = (
+            base_signal * selected_mask.to(base_signal.dtype)
+        )[valid].float()
+        metrics.update(
+            {
+                "distillation/reverse_kl_estimate": Metric(
+                    AggregationType.MEAN, solution_reverse_kl[valid].mean()
+                ),
+                "distillation/student_sampled_token_prob": Metric(
+                    AggregationType.MEAN, valid_student.exp().mean()
+                ),
+                "distillation/teacher_sampled_token_prob": Metric(
+                    AggregationType.MEAN, valid_solution_teacher.exp().mean()
+                ),
+                "distillation/sol_unprivileged_teacher_sampled_token_prob": Metric(
+                    AggregationType.MEAN, valid_unprivileged_teacher.exp().mean()
+                ),
+                "distillation/selected_token_ratio": Metric(
+                    AggregationType.MEAN, selected_mask[valid].float().mean()
+                ),
+                "distillation/selection_gap_mean": Metric(
+                    AggregationType.MEAN, valid_gap.mean()
+                ),
+                "distillation/selected_gap_mean": Metric(
+                    AggregationType.MEAN,
+                    selected_gap.mean()
+                    if selected_gap.numel()
+                    else valid_gap.new_zeros(()),
+                ),
+                "distillation/selection_gradient_signal_relative_change": Metric(
+                    AggregationType.MEAN,
+                    torch.linalg.vector_norm(
+                        valid_selected_signal - valid_base_signal
+                    )
+                    / torch.linalg.vector_norm(valid_base_signal).clamp_min(1e-12),
+                ),
+            }
+        )
+    return selected_reverse_kl, metrics
+
+
 @register_distillation_loss(DistillationLossSettings(names=["oa_opd"], use_estimator=True))  # type: ignore[arg-type]
 def compute_outcome_aware_sampled_token_reverse_kl(
     config: ActorConfig,

@@ -1,0 +1,81 @@
+# Solution-privileged Sol-OPD: Qwen3-4B-Thinking-2507 Teacher and Qwen3-1.7B Student, both thinking.
+
+defaults:
+  - /base
+  - _self_
+
+run_name: pub_sol_opd_qwen3_4b_thinking_2507_to_1p7b_thinking_len8k_100steps
+group_name: PUB_Sol_OPD_Thinking
+run_name_prefix: pub_sol_opd_qwen3_4b_thinking_2507_to_1p7b_thinking_len8k_100steps
+
+student_prompt: qwen3_thinking_prompt
+teacher_prompt: qwen3_privileged_solution_thinking
+
+data:
+  train_files:
+    - ./data/DAPO-17k-English-Qwen3-4B-Instruct-2507-Correct.json
+  val_files:
+    - ./data/AMC-2023.json
+  max_response_length: 8192
+
+actor_rollout_ref:
+  model:
+    path: ./models/Qwen3-1.7B
+  actor:
+    # 2048 prompt + 8192 training response + one shifted-logit token.
+    ppo_max_token_len_per_gpu: 10241
+    optim:
+      lr: 1.0e-6
+  rollout:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    n: 1
+    # 2048 prompt + 8192 response.
+    max_model_len: 10240
+    max_num_batched_tokens: 10240
+    log_prob_max_token_len_per_gpu: 10241
+    val_kwargs:
+      temperature: 0.6
+      top_p: 0.95
+      top_k: -1
+      n: 16
+  ref:
+    log_prob_max_token_len_per_gpu: 10241
+
+algorithm:
+  name: sol_opd
+
+rlvr_generation:
+  train_max_new_tokens: 8192
+  val_max_new_tokens: 8192
+
+distillation:
+  teacher_chunk_size: 128
+  teacher_models:
+    teacher_model:
+      model_path: ./models/Qwen3-4B-Thinking-2507
+      inference:
+        prompt_length: 8192
+        response_length: 8192
+        # 8192 privileged prompt + 8192 response + one teacher prediction token.
+        max_model_len: 16385
+        engine_kwargs:
+          vllm:
+            max_logprobs: 16
+  distillation_loss:
+    loss_mode: sol_reverse_kl
+    selection_ratio: 1.0
+    selection_method: random
+    loss_max_clamp: 20.0
+    log_prob_min_clamp: null
+    policy_loss_mode: reinforce
+    sol_opd_epsilon: 1.0e-6
+
+trainer:
+  experiment_name: ${run_name}
+  total_training_steps: 100
+  default_local_dir: ./outputs/${run_name}
+  val_before_train: true
+  test_freq: 20
+  save_freq: 20

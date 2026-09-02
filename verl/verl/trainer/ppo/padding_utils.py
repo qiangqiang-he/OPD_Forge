@@ -40,6 +40,37 @@ from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 logger = logging.getLogger(__name__)
 
 
+# These fields use the same causal full-sequence layout as ``input_ids``.  A
+# synthetic sample must resize them together with its one-token prompt and
+# one-token response; copying the source tensors leaves incompatible jagged
+# offsets whenever batch upsampling is needed after a failed rollout.
+_FULL_SEQUENCE_TEACHER_FIELDS = (
+    "teacher_ids",
+    "teacher_logprobs",
+    "teacher_sampled_logprobs",
+    "teacher_entropy",
+    "privileged_teacher_logprobs",
+    "sol_unprivileged_teacher_logprobs",
+    "cal_positive_teacher_logprobs",
+    "cal_negative_teacher_logprobs",
+    "teacher_max_logprobs",
+)
+
+
+def _zero_resized_tensor(value: Any, leading_length: int) -> torch.Tensor | None:
+    """Return a zero tensor with a replaced leading sequence dimension."""
+
+    if not isinstance(value, torch.Tensor):
+        return None
+    if value.dim() == 0:
+        return torch.zeros_like(value)
+    return torch.zeros(
+        (leading_length, *value.shape[1:]),
+        dtype=value.dtype,
+        device=value.device,
+    )
+
+
 def build_padding_position_ids(source_position_ids: Any, attention_mask: torch.Tensor) -> torch.Tensor:
     """Build padding position ids with the same rank/prefix shape as the source sample."""
     position_ids = compute_position_id_with_mask(attention_mask.unsqueeze(0)).squeeze(0)
@@ -118,6 +149,31 @@ def construct_minimal_padding_template(
         template_sample["routed_experts"] = routed_experts
     else:
         template_sample.pop("routed_experts", None)
+
+    for field_name in _FULL_SEQUENCE_TEACHER_FIELDS:
+        if field_name not in template_sample:
+            continue
+        resized = _zero_resized_tensor(
+            template_sample[field_name], input_ids.size(0)
+        )
+        if resized is None:
+            raise TypeError(
+                f"Padding field {field_name!r} must be a tensor, got "
+                f"{type(template_sample[field_name]).__name__}."
+            )
+        template_sample[field_name] = resized
+
+    # OA-OPD weights are response-aligned rather than full-sequence-aligned.
+    if "oa_opd_weights" in template_sample:
+        resized = _zero_resized_tensor(
+            template_sample["oa_opd_weights"], response_mask.size(0)
+        )
+        if resized is None:
+            raise TypeError(
+                "Padding field 'oa_opd_weights' must be a tensor, got "
+                f"{type(template_sample['oa_opd_weights']).__name__}."
+            )
+        template_sample["oa_opd_weights"] = resized
 
     # Padding flag is deployed to protect metrics calculation (e.g. response length, score, reward).
     template_tag.update(is_padding=True, prompt_len=1, response_len=1, seq_len=2)

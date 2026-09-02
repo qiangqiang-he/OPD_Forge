@@ -44,6 +44,12 @@ class CustomDataset(RLHFDataset):
             # does not reject otherwise compatible dataset shards.
             part = part.cast_column("question", datasets.Value("string"))
             part = part.cast_column("answer", datasets.Value("string"))
+            if "solution" in part.column_names:
+                part = part.cast_column("solution", datasets.Value("string"))
+            else:
+                # Validation datasets do not need Teacher forwards, so they may
+                # legitimately omit the training-only Sol-OPD solution field.
+                part = part.add_column("solution", [""] * len(part))
             part = part.add_column("_data_source", [Path(data_file).stem] * len(part))
             parts.append(part)
 
@@ -55,9 +61,19 @@ class CustomDataset(RLHFDataset):
         def adapt(example: dict, index: int) -> dict:
             question = str(example["question"])
             answer = str(example["answer"])
+            solution = str(example.get("solution") or "")
             return {
                 "prompt": render_prompt(student_prompt, question=question, answer=answer),
-                "teacher_prompt_text": render_prompt(teacher_prompt, question=question, answer=answer),
+                "teacher_prompt_text": render_prompt(
+                    teacher_prompt,
+                    question=question,
+                    answer=answer,
+                    privileged_solution=solution,
+                ),
+                # Keep a dedicated runtime field instead of making Sol-OPD
+                # depend on an incidental source-column name.
+                "sol_privileged_solution": solution,
+                "sol_question": question,
                 # Cal-OPD renders its two feedback-conditioned teacher prompts
                 # only after the student rollout is available.
                 "cal_question": question,
