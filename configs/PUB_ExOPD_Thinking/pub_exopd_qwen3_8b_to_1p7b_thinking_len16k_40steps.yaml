@@ -1,12 +1,12 @@
-# ExOPD: Qwen3-8B Teacher and Qwen3-1.7B Student, both thinking.
+# ExOPD LoRA r64: Qwen3-8B Teacher and Qwen3-1.7B Student, both thinking.
 
 defaults:
   - /base
   - _self_
 
-run_name: pub_exopd_qwen3_8b_to_1p7b_thinking_len16k_40steps
+run_name: pub_exopd_qwen3_8b_to_1p7b_thinking_len16k_40steps_lora_r64
 group_name: PUB_ExOPD_Thinking
-run_name_prefix: pub_exopd_qwen3_8b_to_1p7b_thinking_len16k_40steps
+run_name_prefix: pub_exopd_qwen3_8b_to_1p7b_thinking_len16k_40steps_lora_r64
 
 student_prompt: qwen3_thinking_prompt
 teacher_prompt: qwen3_thinking_prompt
@@ -21,13 +21,22 @@ data:
 actor_rollout_ref:
   model:
     path: ./models/Qwen3-1.7B
+    # Train a high-capacity adapter on every Transformer dense layer. Disabling
+    # this adapter yields the frozen initial-Student reference policy.
+    lora_rank: 64
+    lora_alpha: 128
+    target_modules: all-linear
+    exclude_modules: null
+    lora:
+      # Keep the adapter separate so disabling it exposes the base reference.
+      merge: false
   actor:
     # 2048 prompt + 8192 training response + one shifted-logit token.
     ppo_max_token_len_per_gpu: 10241
     loss_agg_mode: token-mean
     fsdp_config:
-      # ExOPD colocates a complete current Student and frozen initial Student.
-      fsdp_size: 1
+      # Shard the single base Student across all four Student GPUs.
+      fsdp_size: 4
       param_offload: false
       optimizer_offload: false
     optim:
@@ -42,6 +51,11 @@ actor_rollout_ref:
     # 2048 prompt + 8192 response.
     max_model_len: 10240
     max_num_batched_tokens: 10240
+    load_format: safetensors
+    layered_summon: true
+    checkpoint_engine:
+      # Preserve PEFT metadata during adapter-only weight synchronization.
+      backend: naive
     log_prob_max_token_len_per_gpu: 10241
     val_kwargs:
       temperature: 0.6
@@ -50,10 +64,6 @@ actor_rollout_ref:
       n: 16
   ref:
     log_prob_max_token_len_per_gpu: 10241
-    fsdp_config:
-      fsdp_size: 1
-      param_offload: false
-      forward_only_keep_on_device: true
 
 algorithm:
   name: exopd

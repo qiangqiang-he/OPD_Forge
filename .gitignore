@@ -14,11 +14,17 @@ __pycache__/
 htmlcov/
 tests/
 
-# Versioned CPU regressions for the formal checkpoint/model evaluators.
+# Versioned regression and smoke tests for formal training/evaluation paths.
 !tests/
 tests/*
 !tests/test_checkpoint_evaluation.py
 !tests/test_direct_model_evaluation.py
+!tests/test_exopd_lora.py
+!tests/exopd_lora_single_gpu_smoke.py
+!tests/run_exopd_lora_single_gpu_smoke.sh
+!tests/exopd_lora_split_smoke.py
+!tests/run_exopd_lora_split_smoke.sh
+!tests/exopd_lora_vllm_smoke.py
 
 # Local smoke and temporary experiment configurations
 configs/temp/

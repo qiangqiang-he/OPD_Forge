@@ -765,7 +765,10 @@ class PPOTrainer:
             lora_rank = self.config.actor_rollout_ref.model.get("lora_rank", 0)
         self.ref_in_actor = lora_rank > 0 or self.config.actor_rollout_ref.model.get("lora_adapter_path") is not None
         if self.use_reference_policy:
-            self.ref_policy_wg = all_wg[str(Role.ActorRolloutRef)]
+            if self.ref_in_actor:
+                self.ref_policy_wg = self.actor_rollout_wg
+            else:
+                self.ref_policy_wg = all_wg[str(Role.ActorRolloutRef)]
 
         # 7. initialize reward loop manager
         resource_pool = (
@@ -1299,7 +1302,7 @@ class PPOTrainer:
 
         if do_profile:
             self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
-            if self.use_reference_policy:
+            if self.use_reference_policy and self.ref_policy_wg is not self.actor_rollout_wg:
                 self.ref_policy_wg.start_profile(profile_step=self.global_steps)
             if self.use_critic:
                 self.critic_wg.start_profile(profile_step=self.global_steps)
@@ -1321,7 +1324,7 @@ class PPOTrainer:
 
         if do_profile:
             self.actor_rollout_wg.stop_profile()
-            if self.use_reference_policy:
+            if self.use_reference_policy and self.ref_policy_wg is not self.actor_rollout_wg:
                 self.ref_policy_wg.stop_profile()
             if self.use_critic:
                 self.critic_wg.stop_profile()
@@ -1490,13 +1493,24 @@ class PPOTrainer:
             "compute_loss": False,
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
-        if self.ref_in_actor:
-            metadata["no_lora_adapter"] = True
         batch.extra_info.update(metadata)
-        if self.ref_in_actor:
-            output = self.actor_rollout_wg.compute_log_prob(batch)
-        else:
-            output = self.ref_policy_wg.compute_ref_log_prob(batch)
+        had_adapter_flag = "no_lora_adapter" in batch.extra_info
+        previous_adapter_flag = batch.extra_info.get("no_lora_adapter")
+        try:
+            if self.ref_in_actor:
+                batch.extra_info["no_lora_adapter"] = True
+                output = self.actor_rollout_wg.compute_log_prob(batch)
+            else:
+                output = self.ref_policy_wg.compute_ref_log_prob(batch)
+        finally:
+            # KVBatch dispatch copies metadata for the worker, so scope this flag
+            # explicitly.  Otherwise the following policy log-prob pass would also
+            # run with LoRA disabled and silently become a second reference pass.
+            if self.ref_in_actor:
+                if had_adapter_flag:
+                    batch.extra_info["no_lora_adapter"] = previous_adapter_flag
+                else:
+                    batch.extra_info.pop("no_lora_adapter", None)
         assert len(output) == len(batch)
 
         # 2. write ref_log_prob and entropy back to TransferQueue

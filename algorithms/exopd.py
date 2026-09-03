@@ -1,14 +1,14 @@
-"""ExOPD with a frozen initial-Student reference on every Student GPU.
+"""ExOPD with the frozen initial Student exposed through a LoRA base model.
 
 For tokens sampled by the current Student, ExOPD uses
 
     A = lambda * (log pi_T - log pi_ref) - (log pi_S - log pi_ref)
     L = -E[stop_gradient(A) * log pi_S].
 
-The reference policy is VERL's colocated forward-only reference worker.  The
-configuration contract below requires one-element FSDP shard groups and no
-parameter offload, so every Student data-parallel rank owns a complete current
-Student and a complete frozen initial-Student reference on the same GPU.
+For LoRA runs, the current policy is the base Student with its trainable adapter
+enabled and the reference is the *same* model with the adapter disabled.  This
+keeps the reference mathematically fixed without loading a second Student copy.
+Legacy full-reference exploratory configs remain supported for reproducibility.
 """
 
 from __future__ import annotations
@@ -30,8 +30,12 @@ def _model_lora_rank(model) -> int:
     return rank if rank > 0 else int(model.get("lora_rank", 0))
 
 
+def _uses_lora_reference(model) -> bool:
+    return _model_lora_rank(model) > 0 or model.get("lora_adapter_path") is not None
+
+
 def validate_exopd_config(config) -> None:
-    """Validate the objective and colocated full-replica layout for ExOPD."""
+    """Validate the ExOPD objective and its frozen-reference implementation."""
 
     validate_opd_runtime_config(config)
     if str(config.algorithm.name) != EXOPD_VARIANT:
@@ -74,14 +78,69 @@ def validate_exopd_config(config) -> None:
             "ExOPD uses its reference only in A_ExOPD; disable actor KL loss."
         )
 
-    model = config.actor_rollout_ref.model
-    if _model_lora_rank(model) > 0 or model.get("lora_adapter_path") is not None:
-        raise ValueError(
-            "ExOPD requires a separate full initial-Student reference; LoRA's "
-            "in-actor base reference is not supported."
-        )
-
     actor = config.actor_rollout_ref.actor
+    model = config.actor_rollout_ref.model
+    if (
+        model.get("lora_adapter_path") is not None
+        and int(model.get("lora_rank", 0)) <= 0
+    ):
+        raise ValueError(
+            "ExOPD with an FSDP LoRA adapter path must also set a positive "
+            "top-level model.lora_rank so the training engine constructs the "
+            "PEFT policy before loading the adapter."
+        )
+    if _uses_lora_reference(model):
+        if str(actor.strategy) != "fsdp":
+            raise ValueError("ExOPD's shared LoRA reference currently requires FSDP.")
+        top_level_rank = int(model.get("lora_rank", 0))
+        nested_rank = int(model.get("lora", {}).get("rank", 0))
+        if nested_rank > 0 and top_level_rank <= 0:
+            raise ValueError(
+                "ExOPD with FSDP must set the top-level model.lora_rank; the "
+                "nested model.lora.rank field is for Megatron and does not build "
+                "an FSDP adapter."
+            )
+        if nested_rank > 0 and nested_rank != top_level_rank:
+            raise ValueError(
+                "ExOPD received conflicting top-level and nested LoRA ranks: "
+                f"{top_level_rank} and {nested_rank}."
+            )
+        if str(model.get("target_modules", "")) != "all-linear":
+            raise ValueError(
+                "ExOPD LoRA must use target_modules=all-linear so every "
+                "Transformer dense layer is trainable."
+            )
+        if bool(model.get("lora", {}).get("merge", False)):
+            raise ValueError(
+                "ExOPD requires model.lora.merge=false so disabling the adapter "
+                "recovers the frozen initial-Student reference."
+            )
+
+        rollout = config.actor_rollout_ref.rollout
+        if bool(rollout.get("layered_summon", False)) and "dummy" in str(
+            rollout.get("load_format", "dummy")
+        ):
+            raise ValueError(
+                "ExOPD layered_summon requires a preloaded rollout base model; "
+                "set rollout.load_format=safetensors."
+            )
+        checkpoint_backend = str(
+            rollout.get("checkpoint_engine", {}).get("backend", "naive")
+        )
+        if checkpoint_backend != "naive":
+            raise ValueError(
+                "ExOPD's adapter-only rollout synchronization currently requires "
+                "rollout.checkpoint_engine.backend=naive."
+            )
+
+        if group_name == EXOPD_PUBLICATION_WANDB_GROUP:
+            if _model_lora_rank(model) != 64:
+                raise ValueError("Publication ExOPD requires LoRA rank 64.")
+            if int(model.get("lora_alpha", 0)) != 128:
+                raise ValueError("Publication ExOPD requires LoRA alpha 128.")
+        return
+
+    # Preserve the historical full-reference layout for exploratory configs.
     reference = config.actor_rollout_ref.ref
     if str(actor.strategy) != "fsdp" or str(reference.strategy) != "fsdp":
         raise ValueError("ExOPD full per-GPU replicas currently require FSDP.")
