@@ -274,7 +274,14 @@ def test_completed_model_result_survives_later_failure_and_models_are_never_dele
         del kwargs
         if model_dir == model_b:
             raise RuntimeError("simulated second-model failure")
-        return {"tiny": {"8": {"Avg@16": 1.0}}}
+        return {
+            "tiny": {
+                "8": {
+                    "Avg@16": 1.0,
+                    "per_sample": {"0": {"Avg@16": 1.0}},
+                }
+            }
+        }
 
     monkeypatch.setattr(model_evaluation, "evaluate_model", fake_evaluate_model)
 
@@ -284,7 +291,11 @@ def test_completed_model_result_survives_later_failure_and_models_are_never_dele
     first_result = project_root / "eval_results/direct-model-test/model-a.json"
     summary_path = project_root / "eval_results/direct-model-test/summary.json"
     assert first_result.is_file()
-    assert json.loads(first_result.read_text(encoding="utf-8"))["model_name"] == "model-a"
+    first_payload = json.loads(first_result.read_text(encoding="utf-8"))
+    assert first_payload["model_name"] == "model-a"
+    assert first_payload["datasets"]["tiny"]["8"]["per_sample"] == {
+        "0": {"Avg@16": 1.0}
+    }
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert summary["status"] == "failed"
     assert [item["status"] for item in summary["models"]] == [

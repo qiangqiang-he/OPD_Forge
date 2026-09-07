@@ -43,6 +43,8 @@ length_control: [8192, 16384, 20480, 32768]
 #   Pass@n          = fraction of questions with at least one correct rollout
 #   mean_length     = mean response-token count after applying the length limit
 #   truncation_rate = fraction of rollouts cut off by that length limit
+# Every length also contains per_sample, keyed by the zero-based dataset sample
+# index. Each entry reports that sample's Avg@n over its n sampled rollouts.
 report:
   metrics: [avg_at_n, pass_at_n, mean_length, truncation_rate]
 

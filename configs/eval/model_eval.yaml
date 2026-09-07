@@ -45,6 +45,8 @@ sampling:
 length_control: [8192, 16384, 20480, 32768]
 
 report:
+  # Every length also contains per_sample, keyed by the zero-based dataset
+  # sample index, with that sample's Avg@n over its n sampled rollouts.
   metrics: [avg_at_n, pass_at_n, mean_length, truncation_rate]
 
 runtime:

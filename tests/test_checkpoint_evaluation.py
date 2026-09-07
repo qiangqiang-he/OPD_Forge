@@ -141,7 +141,7 @@ def test_posthoc_length_scoring_uses_token_prefix_and_tracks_truncation():
     assert length_finished[4]["truncated"] == 1
 
 
-def test_aggregate_emits_exactly_the_four_requested_metrics():
+def test_aggregate_emits_dataset_metrics_and_per_sample_avg_at_n():
     records = [
         {
             "dataset": "math",
@@ -194,18 +194,83 @@ def test_aggregate_emits_exactly_the_four_requested_metrics():
         "Pass@2": 0.5,
         "mean_length": 1.75,
         "truncation_rate": 0.75,
+        "per_sample": {
+            "0": {"Avg@2": 0.5},
+            "1": {"Avg@2": 0.0},
+        },
     }
     assert result["math"]["4"] == {
         "Avg@2": 0.75,
         "Pass@2": 1.0,
         "mean_length": 3.0,
         "truncation_rate": 0.25,
+        "per_sample": {
+            "0": {"Avg@2": 1.0},
+            "1": {"Avg@2": 0.5},
+        },
     }
     assert set(result["math"]["4"]) == {
         "Avg@2",
         "Pass@2",
         "mean_length",
         "truncation_rate",
+        "per_sample",
+    }
+
+
+def test_aggregate_emits_avg_at_16_for_every_dataset_sample_at_every_length():
+    records = []
+    expected_correct = {
+        ("dataset-a", 0): (4, 8),
+        ("dataset-a", 1): (5, 16),
+        ("dataset-b", 0): (0, 12),
+    }
+    for (dataset, question_index), (
+        short_correct,
+        full_correct,
+    ) in expected_correct.items():
+        records.append(
+            {
+                "dataset": dataset,
+                "question_index": question_index,
+                "lengths": {
+                    "8": {
+                        "rollouts": 16,
+                        "correct_count": short_correct,
+                        "token_count": 128,
+                        "truncated_count": 16,
+                    },
+                    "16": {
+                        "rollouts": 16,
+                        "correct_count": full_correct,
+                        "token_count": 256,
+                        "truncated_count": 0,
+                    },
+                },
+            }
+        )
+
+    result = aggregate_question_results(
+        question_results=list(reversed(records)),
+        dataset_question_counts={"dataset-a": 2, "dataset-b": 1},
+        dataset_order=["dataset-a", "dataset-b"],
+        length_control=[8, 16],
+        n=16,
+    )
+
+    assert result["dataset-a"]["8"]["per_sample"] == {
+        "0": {"Avg@16": 4 / 16},
+        "1": {"Avg@16": 5 / 16},
+    }
+    assert result["dataset-a"]["16"]["per_sample"] == {
+        "0": {"Avg@16": 8 / 16},
+        "1": {"Avg@16": 16 / 16},
+    }
+    assert result["dataset-b"]["8"]["per_sample"] == {
+        "0": {"Avg@16": 0.0},
+    }
+    assert result["dataset-b"]["16"]["per_sample"] == {
+        "0": {"Avg@16": 12 / 16},
     }
 
 

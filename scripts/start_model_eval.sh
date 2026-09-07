@@ -51,4 +51,5 @@ export TOKENIZERS_PARALLELISM=false
 export PYTHONPATH="$project_root/verl:$project_root${PYTHONPATH:+:$PYTHONPATH}"
 
 cd "$project_root"
+# The result JSON includes per-sample Avg@n for every dataset and length limit.
 exec python -m utils.evaluate_models --config "$config_file" "$@"

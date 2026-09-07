@@ -751,8 +751,8 @@ def aggregate_question_results(
     dataset_order: Sequence[str],
     length_control: Sequence[int],
     n: int,
-) -> dict[str, dict[str, dict[str, float]]]:
-    """Aggregate per-question counters into the four requested metrics."""
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Aggregate dataset metrics and every dataset sample's Avg@n by length."""
 
     expected_keys = {
         (dataset, question_index)
@@ -774,17 +774,25 @@ def aggregate_question_results(
 
     avg_label = f"Avg@{n}"
     pass_label = f"Pass@{n}"
-    summaries: dict[str, dict[str, dict[str, float]]] = {}
+    summaries: dict[str, dict[str, dict[str, Any]]] = {}
     for dataset in dataset_order:
-        records = [record for record in question_results if record["dataset"] == dataset]
+        records = sorted(
+            (
+                record
+                for record in question_results
+                if record["dataset"] == dataset
+            ),
+            key=lambda record: int(record["question_index"]),
+        )
         question_count = dataset_question_counts[dataset]
         rollout_count = question_count * n
-        length_summaries: dict[str, dict[str, float]] = {}
+        length_summaries: dict[str, dict[str, Any]] = {}
         for limit in length_control:
             correct_count = 0
             passed_questions = 0
             token_count = 0
             truncated_count = 0
+            per_sample: dict[str, dict[str, float]] = {}
             for record in records:
                 counters = record["lengths"][str(limit)]
                 per_question_rollouts = int(counters["rollouts"])
@@ -796,6 +804,9 @@ def aggregate_question_results(
                 per_question_correct = int(counters["correct_count"])
                 if not 0 <= per_question_correct <= n:
                     raise RuntimeError("Invalid correct_count in worker result.")
+                per_sample[str(int(record["question_index"]))] = {
+                    avg_label: per_question_correct / n,
+                }
                 correct_count += per_question_correct
                 passed_questions += int(per_question_correct > 0)
                 token_count += int(counters["token_count"])
@@ -805,6 +816,7 @@ def aggregate_question_results(
                 pass_label: passed_questions / question_count,
                 "mean_length": token_count / rollout_count,
                 "truncation_rate": truncated_count / rollout_count,
+                "per_sample": per_sample,
             }
         summaries[dataset] = length_summaries
     return summaries
@@ -1087,7 +1099,7 @@ def evaluate_model(
     progress_label: str,
     process_name_prefix: str,
     start_event: str,
-) -> dict[str, dict[str, dict[str, float]]]:
+) -> dict[str, dict[str, dict[str, Any]]]:
     """Evaluate one loadable model with one independent full replica per GPU."""
 
     context = mp.get_context("spawn")
@@ -1154,7 +1166,7 @@ def evaluate_checkpoint(
     model_dir: Path,
     batches: Sequence[Sequence[dict[str, Any]]],
     dataset_question_counts: Mapping[str, int],
-) -> dict[str, dict[str, dict[str, float]]]:
+) -> dict[str, dict[str, dict[str, Any]]]:
     """Evaluate one checkpoint through the shared loadable-model engine."""
 
     return evaluate_model(
