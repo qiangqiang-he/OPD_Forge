@@ -10,6 +10,7 @@ run_name_prefix: pub_cal_opd_qwen3_30b_a3b_thinking_2507_to_4b_thinking_len16k_1
 
 student_prompt: qwen3_thinking_prompt
 teacher_prompt: qwen3_thinking_prompt
+cal_intervention_type: eval
 
 data:
   train_files:

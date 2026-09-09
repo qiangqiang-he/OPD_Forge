@@ -1,0 +1,34 @@
+# Cal-OPD task-agnostic instruction intervention ablation.
+
+defaults:
+  - /PUB_Cal_OPD_Thinking/pub_cal_opd_qwen3_4b_thinking_2507_to_1p7b_thinking_len16k_100steps@_global_
+  - _self_
+
+run_name: pub_cal_opd_inst_qwen3_4b_thinking_2507_to_1p7b_thinking_len16k_100steps
+run_name_prefix: pub_cal_opd_inst_qwen3_4b_thinking_2507_to_1p7b_thinking_len16k_100steps
+cal_intervention_type: inst
+
+data:
+  train_files:
+    - ./data/DAPO-17k-English-Qwen3-4B-Instruct-2507-Correct.json
+  max_prompt_length: 8192
+
+actor_rollout_ref:
+  actor:
+    # 8192 prompt + 16384 response + one shifted-logit token.
+    ppo_max_token_len_per_gpu: 24577
+  rollout:
+    # 8192 prompt + 16384 response.
+    max_model_len: 24576
+    max_num_batched_tokens: 24576
+    log_prob_max_token_len_per_gpu: 24577
+  ref:
+    log_prob_max_token_len_per_gpu: 24577
+
+distillation:
+  teacher_models:
+    teacher_model:
+      inference:
+        prompt_length: 8192
+        response_length: 16384
+        max_model_len: 24577

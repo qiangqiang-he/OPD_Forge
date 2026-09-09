@@ -162,6 +162,24 @@ def configure_opd_defaults(config) -> tuple[str, str]:
     )
     OmegaConf.update(config, "data.student_prompt", student_prompt, force_add=True)
     OmegaConf.update(config, "data.teacher_prompt", teacher_prompt, force_add=True)
+    if str(config.algorithm.name) == "cal_opd":
+        from utils.prompts import normalize_cal_intervention_type
+
+        intervention_type = normalize_cal_intervention_type(
+            config.get("cal_intervention_type", "")
+        )
+        OmegaConf.update(
+            config,
+            "cal_intervention_type",
+            intervention_type,
+            force_add=True,
+        )
+        OmegaConf.update(
+            config,
+            "data.cal_intervention_type",
+            intervention_type,
+            force_add=True,
+        )
     configure_run_metadata(config)
     return student_prompt, teacher_prompt
 

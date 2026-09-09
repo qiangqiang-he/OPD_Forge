@@ -8,7 +8,12 @@ import datasets
 import numpy as np
 
 from verl.utils.dataset.rl_dataset import RLHFDataset
-from utils.prompts import render_prompt
+from utils.cal_opd_interventions import (
+    choose_cal_opd_wrong_solution_indices,
+    compute_token_lengths,
+    make_cal_opd_wrong_answer,
+)
+from utils.prompts import normalize_cal_intervention_type, render_prompt
 
 
 class CustomDataset(RLHFDataset):
@@ -57,11 +62,46 @@ class CustomDataset(RLHFDataset):
 
         student_prompt = str(self.config.student_prompt)
         teacher_prompt = str(self.config.teacher_prompt)
+        cal_intervention_type = normalize_cal_intervention_type(
+            self.config.get("cal_intervention_type", "")
+        )
+        dataset_seed = int(self.config.get("seed", 0))
+        solution_texts = [str(solution or "") for solution in dataframe["solution"]]
+        wrong_solution_indices = [-1] * len(dataframe)
+        if cal_intervention_type == "solution":
+            records = [
+                {
+                    "question": question,
+                    "answer": answer,
+                    "solution": solution,
+                }
+                for question, answer, solution in zip(
+                    dataframe["question"],
+                    dataframe["answer"],
+                    dataframe["solution"],
+                    strict=True,
+                )
+            ]
+            if sum(bool(solution.strip()) for solution in solution_texts) >= 2:
+                solution_token_lengths = compute_token_lengths(
+                    self.tokenizer,
+                    solution_texts,
+                )
+                wrong_solution_indices = choose_cal_opd_wrong_solution_indices(
+                    records,
+                    solution_token_lengths,
+                )
 
         def adapt(example: dict, index: int) -> dict:
             question = str(example["question"])
             answer = str(example["answer"])
             solution = str(example.get("solution") or "")
+            wrong_solution_index = wrong_solution_indices[index]
+            wrong_solution = (
+                solution_texts[wrong_solution_index]
+                if wrong_solution_index >= 0
+                else ""
+            )
             return {
                 "prompt": render_prompt(student_prompt, question=question, answer=answer),
                 "teacher_prompt_text": render_prompt(
@@ -77,6 +117,18 @@ class CustomDataset(RLHFDataset):
                 # Cal-OPD renders its two feedback-conditioned teacher prompts
                 # only after the student rollout is available.
                 "cal_question": question,
+                "cal_ground_truth_answer": answer,
+                "cal_wrong_answer": (
+                    make_cal_opd_wrong_answer(
+                        answer,
+                        seed=dataset_seed,
+                        record_index=index,
+                    )
+                    if cal_intervention_type == "answer"
+                    else ""
+                ),
+                "cal_privileged_solution": solution,
+                "cal_wrong_solution": wrong_solution,
                 # PS-OPD constructs its privileged prompt only after the
                 # student's rollout (and candidate answer) is available.
                 "ps_question": question,

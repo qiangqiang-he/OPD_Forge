@@ -10,6 +10,7 @@ run_name_prefix: cal_opd_math33k_100steps
 
 student_prompt: qwen3_no_thinking_prompt
 teacher_prompt: qwen3_no_thinking_prompt
+cal_intervention_type: eval
 
 data:
   train_files:

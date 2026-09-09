@@ -27,6 +27,62 @@ You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
 """
 
 
+qwen3_positive_task_agnostic_thinking = r"""<|im_start|>system
+You are a helpful math assistant.
+Please solve the math problem step by step clearly and concisely.
+You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
+<|im_start|>user
+{question}
+
+Please reason through the problem carefully and thoroughly. Verify intermediate steps and provide a complete, rigorous solution.<|im_end|>
+<|im_start|>assistant
+"""
+
+
+qwen3_negative_task_agnostic_thinking = r"""<|im_start|>system
+You are a helpful math assistant.
+Please solve the math problem step by step clearly and concisely.
+You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
+<|im_start|>user
+{question}
+
+Please solve the problem quickly and directly. Avoid unnecessary elaboration or extensive verification and reach the final answer efficiently.<|im_end|>
+<|im_start|>assistant
+"""
+
+
+qwen3_positive_task_agnostic_no_thinking = r"""<|im_start|>system
+You are a helpful math assistant.
+Please solve the math problem step by step clearly and concisely.
+You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
+<|im_start|>user
+{question}
+
+Please reason through the problem carefully and thoroughly. Verify intermediate steps and provide a complete, rigorous solution.<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+"""
+
+
+qwen3_negative_task_agnostic_no_thinking = r"""<|im_start|>system
+You are a helpful math assistant.
+Please solve the math problem step by step clearly and concisely.
+You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
+<|im_start|>user
+{question}
+
+Please solve the problem quickly and directly. Avoid unnecessary elaboration or extensive verification and reach the final answer efficiently.<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+"""
+
+
 qwen3_thinking_with_answer_prompt = r"""<|im_start|>system
 You are a helpful math assistant.
 Please solve the math problem step by step clearly and concisely.
@@ -73,6 +129,59 @@ A reference solution is provided as additional guidance:
 
 Use it while independently providing a complete and logically coherent solution.<|im_end|>
 <|im_start|>assistant
+"""
+
+
+qwen3_privileged_answer_thinking = r"""<|im_start|>system
+You are a helpful math assistant.
+Please solve the math problem step by step clearly and concisely.
+You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
+<|im_start|>user
+{question}
+
+A verified ground-truth answer is provided as a reliable reference:
+{privileged_answer}
+
+Use it to guide your reasoning while providing a complete and logically coherent solution.<|im_end|>
+<|im_start|>assistant
+"""
+
+
+qwen3_privileged_answer_no_thinking = r"""<|im_start|>system
+You are a helpful math assistant.
+Please solve the math problem step by step clearly and concisely.
+You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
+<|im_start|>user
+{question}
+
+A verified ground-truth answer is provided as a reliable reference:
+{privileged_answer}
+
+Use it to guide your reasoning while providing a complete and logically coherent solution.<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+"""
+
+
+qwen3_privileged_solution_no_thinking = r"""<|im_start|>system
+You are a helpful math assistant.
+Please solve the math problem step by step clearly and concisely.
+You must enclose your final answer exactly within \boxed{{}}.<|im_end|>
+<|im_start|>user
+{question}
+
+A reference solution is provided as additional guidance:
+{privileged_solution}
+
+Use it while independently providing a complete and logically coherent solution.<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
 """
 
 
@@ -175,9 +284,16 @@ With this highly negative feedback in mind, solve the problem step by step and a
 PROMPT_TEMPLATES = {
     "qwen3_thinking_prompt": qwen3_thinking_prompt,
     "qwen3_no_thinking_prompt": qwen3_no_thinking_prompt,
+    "qwen3_positive_task_agnostic_thinking": qwen3_positive_task_agnostic_thinking,
+    "qwen3_negative_task_agnostic_thinking": qwen3_negative_task_agnostic_thinking,
+    "qwen3_positive_task_agnostic_no_thinking": qwen3_positive_task_agnostic_no_thinking,
+    "qwen3_negative_task_agnostic_no_thinking": qwen3_negative_task_agnostic_no_thinking,
     "qwen3_thinking_with_answer_prompt": qwen3_thinking_with_answer_prompt,
     "qwen3_no_thinking_with_answer_prompt": qwen3_no_thinking_with_answer_prompt,
     "qwen3_privileged_solution_thinking": qwen3_privileged_solution_thinking,
+    "qwen3_privileged_answer_thinking": qwen3_privileged_answer_thinking,
+    "qwen3_privileged_answer_no_thinking": qwen3_privileged_answer_no_thinking,
+    "qwen3_privileged_solution_no_thinking": qwen3_privileged_solution_no_thinking,
     "qwen3_positive_privileged_feedback_thinking": qwen3_positive_privileged_feedback_thinking,
     "qwen3_positive_privileged_feedback_no_thinking": qwen3_positive_privileged_feedback_no_thinking,
     "qwen3_negative_privileged_feedback_thinking": qwen3_negative_privileged_feedback_thinking,
@@ -197,15 +313,46 @@ SOL_PRIVILEGED_PROMPTS = {
 }
 
 
-CAL_PRIVILEGED_FEEDBACK_PROMPTS = {
-    "qwen3_thinking_prompt": (
-        "qwen3_positive_privileged_feedback_thinking",
-        "qwen3_negative_privileged_feedback_thinking",
-    ),
-    "qwen3_no_thinking_prompt": (
-        "qwen3_positive_privileged_feedback_no_thinking",
-        "qwen3_negative_privileged_feedback_no_thinking",
-    ),
+CAL_INTERVENTION_TYPES = ("inst", "eval", "answer", "solution")
+
+
+CAL_INTERVENTION_PROMPTS = {
+    "qwen3_thinking_prompt": {
+        "inst": (
+            "qwen3_positive_task_agnostic_thinking",
+            "qwen3_negative_task_agnostic_thinking",
+        ),
+        "eval": (
+            "qwen3_positive_privileged_feedback_thinking",
+            "qwen3_negative_privileged_feedback_thinking",
+        ),
+        "answer": (
+            "qwen3_privileged_answer_thinking",
+            "qwen3_privileged_answer_thinking",
+        ),
+        "solution": (
+            "qwen3_privileged_solution_thinking",
+            "qwen3_privileged_solution_thinking",
+        ),
+    },
+    "qwen3_no_thinking_prompt": {
+        "inst": (
+            "qwen3_positive_task_agnostic_no_thinking",
+            "qwen3_negative_task_agnostic_no_thinking",
+        ),
+        "eval": (
+            "qwen3_positive_privileged_feedback_no_thinking",
+            "qwen3_negative_privileged_feedback_no_thinking",
+        ),
+        "answer": (
+            "qwen3_privileged_answer_no_thinking",
+            "qwen3_privileged_answer_no_thinking",
+        ),
+        "solution": (
+            "qwen3_privileged_solution_no_thinking",
+            "qwen3_privileged_solution_no_thinking",
+        ),
+    },
 }
 
 
@@ -218,17 +365,35 @@ def get_prompt_template(name: str) -> str:
         raise ValueError(f"Unknown prompt template {name!r}. Available templates: {available}.") from exc
 
 
-def get_cal_privileged_feedback_prompt_names(teacher_prompt_name: str) -> tuple[str, str]:
+def normalize_cal_intervention_type(intervention_type: str | None) -> str:
+    """Return one of the four canonical Cal-OPD intervention names."""
+
+    normalized = "" if intervention_type is None else str(intervention_type).strip().lower()
+    normalized = normalized or "inst"
+    if normalized not in CAL_INTERVENTION_TYPES:
+        expected = ", ".join(CAL_INTERVENTION_TYPES)
+        raise ValueError(
+            f"Unknown Cal-OPD intervention type {intervention_type!r}; expected one of: {expected}."
+        )
+    return normalized
+
+
+def get_cal_privileged_feedback_prompt_names(
+    teacher_prompt_name: str,
+    intervention_type: str | None = None,
+) -> tuple[str, str]:
     """Return mode-matched positive and negative Cal-OPD prompt names."""
 
+    intervention_type = normalize_cal_intervention_type(intervention_type)
     try:
-        return CAL_PRIVILEGED_FEEDBACK_PROMPTS[teacher_prompt_name]
+        mode_prompts = CAL_INTERVENTION_PROMPTS[teacher_prompt_name]
     except KeyError as exc:
-        supported = ", ".join(sorted(CAL_PRIVILEGED_FEEDBACK_PROMPTS))
+        supported = ", ".join(sorted(CAL_INTERVENTION_PROMPTS))
         raise ValueError(
             "Cal-OPD requires a supported thinking-mode teacher prompt; "
             f"got {teacher_prompt_name!r}, expected one of: {supported}."
         ) from exc
+    return mode_prompts[intervention_type]
 
 
 def get_pri_privileged_prompt_name(student_prompt_name: str) -> str:
@@ -263,6 +428,7 @@ def render_prompt(
     question: str,
     answer: str = "",
     ground_answer: str | None = None,
+    privileged_answer: str = "",
     privileged_solution: str = "",
 ) -> str:
     """Render a registered prompt without applying another chat template."""
@@ -272,5 +438,6 @@ def render_prompt(
         question=question,
         answer=answer,
         ground_answer=ground_answer,
+        privileged_answer=privileged_answer,
         privileged_solution=privileged_solution,
     )

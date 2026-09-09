@@ -19,6 +19,7 @@ from utils.opd_runtime import BaseOPDTrainer, validate_opd_runtime_config
 from utils.prompts import (
     get_cal_privileged_feedback_prompt_names,
     get_prompt_template,
+    normalize_cal_intervention_type,
 )
 from verl.trainer import main_ppo_sync as verl_sync
 from verl.trainer.distillation.losses import compute_calibrated_opd_advantage
@@ -272,8 +273,12 @@ def validate_cal_opd_config(config) -> None:
             "Cal-OPD requires student and teacher to use the same thinking mode; "
             f"got student_prompt={student_prompt!r} and teacher_prompt={teacher_prompt!r}."
         )
+    intervention_type = normalize_cal_intervention_type(
+        config.get("cal_intervention_type", "")
+    )
     positive_prompt, negative_prompt = get_cal_privileged_feedback_prompt_names(
-        teacher_prompt
+        teacher_prompt,
+        intervention_type,
     )
     get_prompt_template(positive_prompt)
     get_prompt_template(negative_prompt)

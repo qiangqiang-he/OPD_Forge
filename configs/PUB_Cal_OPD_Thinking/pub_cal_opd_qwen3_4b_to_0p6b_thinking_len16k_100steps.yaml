@@ -10,6 +10,7 @@ run_name_prefix: pub_cal_opd_qwen3_4b_to_0p6b_thinking_len16k_100steps
 
 student_prompt: qwen3_thinking_prompt
 teacher_prompt: qwen3_thinking_prompt
+cal_intervention_type: eval
 
 data:
   train_files:

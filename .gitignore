@@ -25,6 +25,9 @@ tests/*
 !tests/exopd_lora_split_smoke.py
 !tests/run_exopd_lora_split_smoke.sh
 !tests/exopd_lora_vllm_smoke.py
+!tests/test_cal_opd_interventions.py
+!tests/test_cal_opd_ablation_configs.py
+!tests/run_cal_opd_intervention_ablation_4096.sh
 
 # Local smoke and temporary experiment configurations
 configs/temp/

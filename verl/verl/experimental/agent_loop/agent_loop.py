@@ -1513,25 +1513,87 @@ class AgentLoopWorker:
 
                 from utils.prompts import (
                     get_cal_privileged_feedback_prompt_names,
+                    normalize_cal_intervention_type,
                     render_prompt,
                 )
 
+                intervention_type = normalize_cal_intervention_type(
+                    self.config.get("cal_intervention_type", "")
+                )
                 positive_prompt_name, negative_prompt_name = (
                     get_cal_privileged_feedback_prompt_names(
-                        str(self.config.teacher_prompt)
+                        str(self.config.teacher_prompt),
+                        intervention_type,
                     )
                 )
+                positive_values: dict[str, str] = {"question": question}
+                negative_values: dict[str, str] = {"question": question}
+                if intervention_type == "answer":
+                    correct_answer = str(
+                        _python_scalar(
+                            sample_kwargs.get("cal_ground_truth_answer", "")
+                        )
+                    )
+                    wrong_answer = str(
+                        _python_scalar(sample_kwargs.get("cal_wrong_answer", ""))
+                    )
+                    if not correct_answer.strip() or not wrong_answer.strip():
+                        raise RuntimeError(
+                            "Cal-OPD answer intervention requires non-empty "
+                            "cal_ground_truth_answer and cal_wrong_answer fields."
+                        )
+                    positive_values["privileged_answer"] = correct_answer
+                    negative_values["privileged_answer"] = wrong_answer
+                elif intervention_type == "solution":
+                    correct_solution = str(
+                        _python_scalar(
+                            sample_kwargs.get("cal_privileged_solution", "")
+                        )
+                    )
+                    wrong_solution = str(
+                        _python_scalar(sample_kwargs.get("cal_wrong_solution", ""))
+                    )
+                    if not correct_solution.strip() or not wrong_solution.strip():
+                        raise RuntimeError(
+                            "Cal-OPD solution intervention requires non-empty "
+                            "cal_privileged_solution and cal_wrong_solution fields."
+                        )
+                    positive_values["privileged_solution"] = correct_solution
+                    negative_values["privileged_solution"] = wrong_solution
 
-                positive_prompt_text = render_prompt(
-                    positive_prompt_name, question=question
-                )
-                negative_prompt_text = render_prompt(
-                    negative_prompt_name, question=question
-                )
-                positive_prompt_ids, negative_prompt_ids = await asyncio.gather(
-                    self.tokenize_preformatted_prompt(positive_prompt_text),
-                    self.tokenize_preformatted_prompt(negative_prompt_text),
-                )
+                if intervention_type == "solution":
+                    teacher_prompt_length = (
+                        self.teacher_server_manager.get_teacher_prompt_length(
+                            routing_key
+                        )
+                    )
+                    positive_prompt_ids = _tokenize_solution_privileged_prompt(
+                        self.tokenizer,
+                        prompt_name=positive_prompt_name,
+                        question=question,
+                        privileged_solution=positive_values["privileged_solution"],
+                        max_prompt_length=teacher_prompt_length,
+                    )
+                    negative_prompt_ids = _tokenize_solution_privileged_prompt(
+                        self.tokenizer,
+                        prompt_name=negative_prompt_name,
+                        question=question,
+                        privileged_solution=negative_values["privileged_solution"],
+                        max_prompt_length=teacher_prompt_length,
+                    )
+                else:
+                    positive_prompt_text = render_prompt(
+                        positive_prompt_name,
+                        **positive_values,
+                    )
+                    negative_prompt_text = render_prompt(
+                        negative_prompt_name,
+                        **negative_values,
+                    )
+                    positive_prompt_ids, negative_prompt_ids = await asyncio.gather(
+                        self.tokenize_preformatted_prompt(positive_prompt_text),
+                        self.tokenize_preformatted_prompt(negative_prompt_text),
+                    )
 
                 async def _conditioned_teacher_forward(conditioned_prompt_ids):
                     return await self.teacher_server_manager.compute_teacher_logprobs_single(
