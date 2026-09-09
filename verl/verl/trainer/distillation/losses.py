@@ -276,6 +276,46 @@ def distillation_loss(
         # clamping min is for k1 loss which can be negative
         distillation_losses = distillation_losses.clamp(min=-loss_config.loss_max_clamp, max=loss_config.loss_max_clamp)
 
+    if loss_config.loss_mode == "error_reverse_kl":
+        loss_normalization = data.get("error_opd_loss_normalization", None)
+        if loss_normalization is None:
+            raise RuntimeError(
+                "Error-OPD actor input is missing error_opd_loss_normalization."
+            )
+        loss_normalization = tu.unwrap_non_tensor_data(loss_normalization)
+        if not torch.is_tensor(loss_normalization):
+            loss_normalization = torch.tensor(
+                float(loss_normalization),
+                dtype=distillation_losses.dtype,
+                device=distillation_losses.device,
+            )
+        loss_normalization = loss_normalization.to(
+            dtype=distillation_losses.dtype,
+            device=distillation_losses.device,
+        ).reshape(-1)
+        if loss_normalization.numel() == 1:
+            loss_normalization = loss_normalization.expand(
+                distillation_losses.shape[0]
+            )
+        elif loss_normalization.numel() != distillation_losses.shape[0]:
+            raise ValueError(
+                "Error-OPD loss normalization must be scalar or have one value "
+                f"per trajectory; got {loss_normalization.numel()} values for "
+                f"{distillation_losses.shape[0]} trajectories."
+            )
+        if (
+            not bool(torch.isfinite(loss_normalization).all())
+            or bool(loss_normalization.lt(0.0).any())
+        ):
+            raise ValueError(
+                "Error-OPD loss normalization values must be finite and non-negative."
+            )
+        # The clamp above remains identical to PG-OPD.  Scaling afterwards
+        # changes only the reducer denominator and not the per-token signal.
+        distillation_losses = (
+            distillation_losses * loss_normalization.unsqueeze(-1)
+        )
+
     if loss_config.loss_mode == "fire_opd":
         loss_normalization = data.get("fire_opd_loss_normalization", None)
         if loss_normalization is None:
@@ -784,6 +824,137 @@ def compute_sampled_token_reverse_kl(
                         "opd_statistics_threshold",
                         1.0e-4,
                     )
+                ),
+            )
+        )
+    return selected_reverse_kl, metrics
+
+
+@register_distillation_loss(
+    DistillationLossSettings(names=["error_reverse_kl"], use_estimator=True)
+)  # type: ignore[arg-type]
+def compute_error_only_sampled_token_reverse_kl(
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
+    model_output: dict,
+    data: TensorDict,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Return PG-OPD reverse-KL only for verifier-incorrect rollouts."""
+
+    del config
+    student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
+    teacher_log_probs = no_padding_2_padding(
+        data["teacher_logprobs"], data
+    ).squeeze(-1)
+    response_mask = data["response_mask"]
+    if response_mask.is_nested:
+        response_mask = response_mask.bool().to_padded_tensor(False)
+    else:
+        response_mask = response_mask.bool()
+    error_token_mask = data.get("error_opd_token_mask", None)
+    if error_token_mask is None:
+        raise RuntimeError(
+            "Error-OPD actor input is missing controller-computed "
+            "error_opd_token_mask."
+        )
+    if error_token_mask.is_nested:
+        error_token_mask = error_token_mask.bool().to_padded_tensor(False)
+    else:
+        error_token_mask = error_token_mask.bool()
+    if not (
+        teacher_log_probs.shape
+        == student_log_probs.shape
+        == response_mask.shape
+        == error_token_mask.shape
+    ):
+        raise ValueError("Error-OPD token tensors must have identical response shapes.")
+    if bool((error_token_mask & ~response_mask).any()):
+        raise ValueError("Error-OPD token mask must be a subset of response_mask.")
+
+    loss_config = distillation_config.distillation_loss
+    sampled_reverse_kl = student_log_probs - teacher_log_probs
+    selected_mask = select_opd_reverse_kl_tokens(
+        sampled_reverse_kl,
+        error_token_mask,
+        selection_ratio=float(loss_config.selection_ratio),
+        selection_method=str(loss_config.selection_method),
+    )
+    selected_reverse_kl = sampled_reverse_kl * selected_mask.to(
+        sampled_reverse_kl.dtype
+    )
+
+    zero = sampled_reverse_kl.float().sum() * 0.0
+
+    def masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        selected = values[mask].float()
+        return selected.mean() if selected.numel() else zero
+
+    valid_gap = sampled_reverse_kl.float().abs()
+    base_signal = sampled_reverse_kl
+    if loss_config.loss_max_clamp is not None:
+        base_signal = base_signal.clamp(
+            min=-loss_config.loss_max_clamp,
+            max=loss_config.loss_max_clamp,
+        )
+    selected_signal = base_signal * selected_mask.to(base_signal.dtype)
+    if bool(error_token_mask.any()):
+        relative_change = (
+            torch.linalg.vector_norm(
+                selected_signal[error_token_mask].float()
+                - base_signal[error_token_mask].float()
+            )
+            / torch.linalg.vector_norm(
+                base_signal[error_token_mask].float()
+            ).clamp_min(1e-12)
+        )
+        selected_ratio = selected_mask[error_token_mask].float().mean()
+    else:
+        relative_change = zero
+        selected_ratio = zero
+
+    metrics = {
+        "distillation/reverse_kl_estimate": Metric(
+            AggregationType.MEAN,
+            masked_mean(sampled_reverse_kl, error_token_mask),
+        ),
+        "distillation/student_sampled_token_prob": Metric(
+            AggregationType.MEAN,
+            masked_mean(student_log_probs.float().exp(), error_token_mask),
+        ),
+        "distillation/teacher_sampled_token_prob": Metric(
+            AggregationType.MEAN,
+            masked_mean(teacher_log_probs.float().exp(), error_token_mask),
+        ),
+        "distillation/selected_token_ratio": Metric(
+            AggregationType.MEAN, selected_ratio
+        ),
+        "distillation/selection_gap_mean": Metric(
+            AggregationType.MEAN, masked_mean(valid_gap, error_token_mask)
+        ),
+        "distillation/selected_gap_mean": Metric(
+            AggregationType.MEAN, masked_mean(valid_gap, selected_mask)
+        ),
+        "distillation/selection_gradient_signal_relative_change": Metric(
+            AggregationType.MEAN, relative_change
+        ),
+    }
+    track_outcome_metrics = (
+        bool(
+            tu.get_non_tensor_data(
+                data, "track_opd_outcome_metrics", default=False
+            )
+        )
+        if isinstance(data, TensorDict)
+        else bool(data.get("track_opd_outcome_metrics", False))
+    )
+    if track_outcome_metrics and "rm_scores" in data:
+        metrics.update(
+            compute_opd_outcome_statistics(
+                advantage=-selected_reverse_kl,
+                response_mask=selected_mask,
+                rm_scores=data["rm_scores"],
+                statistics_threshold=float(
+                    getattr(loss_config, "opd_statistics_threshold", 1.0e-4)
                 ),
             )
         )

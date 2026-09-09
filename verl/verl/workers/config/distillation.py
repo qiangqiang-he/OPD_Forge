@@ -189,6 +189,7 @@ class DistillationLossConfig(BaseConfig):
         if not self.use_policy_gradient and self.loss_mode in {
             "k1",
             "reverse_kl",
+            "error_reverse_kl",
             "sol_reverse_kl",
             "cal_reverse_kl",
             "eopd",
