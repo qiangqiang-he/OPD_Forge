@@ -31,6 +31,9 @@ ALGORITHM_REGISTRY: dict[str, AlgorithmRegistration] = {
     "correct_opd": AlgorithmRegistration(
         "algorithms.correct_opd", "CorrectOPDTrainer", "validate_correct_opd_config"
     ),
+    "correct_rl": AlgorithmRegistration(
+        "algorithms.correct_rl", "CorrectRLTrainer", "validate_correct_rl_config"
+    ),
     "pri_opd": AlgorithmRegistration(
         "algorithms.pri_opd", "PriOPDTrainer", "validate_pri_opd_config"
     ),

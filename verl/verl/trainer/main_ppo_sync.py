@@ -1630,25 +1630,50 @@ class PPOTrainer:
         calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
             self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
         )
+        distillation_enabled = is_distillation_enabled(self.config.get("distillation"))
         distillation_use_topk = (
             self.distillation_config.distillation_loss.loss_settings.use_topk
-            if is_distillation_enabled(self.config.get("distillation"))
+            if distillation_enabled
             else False
         )
         distillation_combined_topk = bool(distillation_use_topk) and (
             self.distillation_config.distillation_loss.loss_mode == "eopd"
         )
+        distillation_chunk_size = (
+            int(self.distillation_config.student_chunk_size)
+            if distillation_enabled
+            else 0
+        )
+        distillation_log_prob_min_clamp = (
+            self.distillation_config.distillation_loss.log_prob_min_clamp
+            if distillation_enabled
+            else None
+        )
+        eopd_entropy_threshold = (
+            self.distillation_config.distillation_loss.eopd_entropy_threshold
+            if distillation_enabled
+            else 0.0
+        )
+        global_batch_size = ppo_mini_batch_size
+        if str(self.config.algorithm.get("name", "")) == "correct_rl":
+            # Correct-RL uses seq-mean-token-mean, but its sequence denominator
+            # is the global number of correct trajectories rather than the
+            # physical PPO mini-batch size.
+            global_batch_size = int(
+                batch.extra_info.get("correct_rl_correct_count", 0)
+            )
         extra_info = {
             "calculate_entropy": calculate_entropy,
             "distillation_use_topk": distillation_use_topk,
             "distillation_direct_chunked": bool(distillation_use_topk)
+            and distillation_enabled
             and not bool(self.distillation_config.distillation_loss.use_task_rewards)
             and not bool(self.distillation_config.distillation_loss.use_policy_gradient),
             "distillation_combined_topk": distillation_combined_topk,
-            "distillation_chunk_size": int(self.distillation_config.student_chunk_size),
-            "distillation_log_prob_min_clamp": self.distillation_config.distillation_loss.log_prob_min_clamp,
-            "eopd_entropy_threshold": self.distillation_config.distillation_loss.eopd_entropy_threshold,
-            "global_batch_size": ppo_mini_batch_size,
+            "distillation_chunk_size": distillation_chunk_size,
+            "distillation_log_prob_min_clamp": distillation_log_prob_min_clamp,
+            "eopd_entropy_threshold": eopd_entropy_threshold,
+            "global_batch_size": global_batch_size,
             "mini_batch_size": ppo_mini_batch_size,
             "epochs": self.config.actor_rollout_ref.actor.ppo_epochs,
             "seed": self.config.actor_rollout_ref.actor.data_loader_seed,
@@ -1673,7 +1698,6 @@ class PPOTrainer:
             "prompts",
             "responses",
             "response_mask",
-            "values",
             "advantages",
             "returns",
             "rm_scores",
@@ -1682,6 +1706,8 @@ class PPOTrainer:
             "metrics",
             "extra_fields",
         ]
+        if self.use_critic:
+            fields.insert(3, "values")
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
         agent_metrics = data.pop("metrics").tolist()
         extra_fields = data.pop("extra_fields").tolist()

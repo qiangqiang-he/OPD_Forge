@@ -1,0 +1,59 @@
+# Correct-RL: Qwen3-30B-A3B-Instruct-2507 Student rollout to Qwen3-8B.
+
+defaults:
+  - /base
+  - _self_
+
+run_name: pub_correct_rl_qwen3_30b_a3b_instruct_2507_to_8b_no_thinking_len10k_100steps
+group_name: PUB_Correct_RL_NoThinking
+run_name_prefix: pub_correct_rl_qwen3_30b_a3b_instruct_2507_to_8b_no_thinking_len10k_100steps
+
+student_prompt: qwen3_no_thinking_prompt
+teacher_prompt: qwen3_no_thinking_prompt
+
+data:
+  train_files: [./data/DAPO-17k.json]
+  val_files: [./data/AMC-2023.json, ./data/AIME-2024.json, ./data/AIME-2025.json]
+  max_prompt_length: 2048
+  max_response_length: 16384
+
+actor_rollout_ref:
+  model: {path: ./models/Qwen3-8B}
+  actor:
+    ppo_max_token_len_per_gpu: 12289
+    loss_agg_mode: seq-mean-token-mean
+    clip_ratio: 0.2
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.2
+    policy_loss: {loss_mode: vanilla}
+    use_kl_loss: false
+    optim: {lr: 1.0e-6}
+  rollout:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    n: 1
+    max_model_len: 18432
+    max_num_batched_tokens: 18432
+    log_prob_max_token_len_per_gpu: 12289
+    val_kwargs: {temperature: 0.6, top_p: 0.95, top_k: -1, n: 16}
+
+algorithm:
+  name: correct_rl
+  adv_estimator: grpo
+  use_kl_in_reward: false
+
+rlvr_generation: {train_max_new_tokens: 10240, val_max_new_tokens: 16384}
+
+distillation:
+  enabled: false
+
+critic: {enable: false}
+
+trainer:
+  experiment_name: ${run_name}
+  total_training_steps: 100
+  default_local_dir: ./outputs/${run_name}
+  val_before_train: true
+  test_freq: 20
+  save_freq: 20

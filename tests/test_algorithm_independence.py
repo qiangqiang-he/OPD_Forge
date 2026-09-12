@@ -19,6 +19,7 @@ ALGORITHM_FILES = (
     "oa_opd.py",
     "fast_oa_opd.py",
     "correct_opd.py",
+    "correct_rl.py",
 )
 
 CANONICAL_ALGORITHM_NAMES = {
@@ -36,6 +37,7 @@ CANONICAL_ALGORITHM_NAMES = {
     "oa_opd",
     "fast_oa_opd",
     "correct_opd",
+    "correct_rl",
 }
 
 

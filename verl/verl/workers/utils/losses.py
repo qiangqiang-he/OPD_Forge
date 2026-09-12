@@ -90,6 +90,13 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     # select fields and convert to padded tensor
     fields = ["response_mask", "old_log_probs", "advantages"]
+    # Correct-RL keeps the original response mask for reporting response
+    # lengths and entropy, but supplies a correctness-filtered policy mask for
+    # the actor objective.  Wrong trajectories therefore contribute neither
+    # tokens nor sequences to the PPO reducer.
+    correct_rl_mode = "correct_rl_loss_mask" in data
+    if correct_rl_mode:
+        fields.append("correct_rl_loss_mask")
     loss_mode = config.policy_loss.get("loss_mode", "vanilla")
     if "rollout_is_weights" in data:
         fields.append("rollout_is_weights")
@@ -98,6 +105,11 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     data = data.select(*fields).to_padded_tensor()
 
     response_mask = data["response_mask"].to(bool)
+    policy_response_mask = (
+        data["correct_rl_loss_mask"].to(bool)
+        if correct_rl_mode
+        else response_mask
+    )
     # compute policy loss
     old_log_prob = data["old_log_probs"]
     advantages = data["advantages"]
@@ -109,13 +121,24 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         old_log_prob=old_log_prob,
         log_prob=log_prob,
         advantages=advantages,
-        response_mask=response_mask,
+        response_mask=policy_response_mask,
         loss_agg_mode=loss_agg_mode,
         config=config,
         rollout_is_weights=rollout_is_weights,
     )
     policy_loss_fn = get_policy_loss_fn(loss_mode)
-    pg_loss, pg_metrics = policy_loss_fn(**policy_loss_kwargs)
+    if correct_rl_mode and not bool(policy_response_mask.any()):
+        # All rollouts were incorrect.  Correct-RL intentionally performs no
+        # update; keep the scalar connected to autograd for a safe backward
+        # call if a backend still invokes this path.
+        pg_loss = log_prob.float().sum() * 0.0
+        pg_metrics = {
+            "actor/pg_clipfrac": 0.0,
+            "actor/ppo_kl": 0.0,
+            "actor/pg_clipfrac_lower": 0.0,
+        }
+    else:
+        pg_loss, pg_metrics = policy_loss_fn(**policy_loss_kwargs)
 
     # AggregationType.MEAN for pg metrics: assumes policy_loss_fn normalizes by local_bsz/local_tokens
     # Ex: in compute_policy_loss_vanilla, pg_metrics are pg_clipfrac, ppo_kl, pg_clipfrac_lower
@@ -127,9 +150,15 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     # add entropy loss
     if entropy is not None:
-        entropy_loss = agg_loss(
-            loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
-        )
+        if correct_rl_mode and not bool(policy_response_mask.any()):
+            entropy_loss = log_prob.float().sum() * 0.0
+        else:
+            entropy_loss = agg_loss(
+                loss_mat=entropy,
+                loss_mask=policy_response_mask if correct_rl_mode else response_mask,
+                loss_agg_mode=loss_agg_mode,
+                **config.global_batch_info,
+            )
         entropy_coeff = config.entropy_coeff
         policy_loss -= entropy_coeff * entropy_loss
         metrics["actor/entropy_loss"] = Metric(value=entropy_loss, aggregation=metric_aggregation)
