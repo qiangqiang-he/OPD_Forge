@@ -190,6 +190,7 @@ class DistillationLossConfig(BaseConfig):
             "k1",
             "reverse_kl",
             "error_reverse_kl",
+            "correct_reverse_kl",
             "sol_reverse_kl",
             "cal_reverse_kl",
             "eopd",

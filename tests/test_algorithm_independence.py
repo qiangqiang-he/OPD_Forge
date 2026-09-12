@@ -7,6 +7,7 @@ from pathlib import Path
 ALGORITHM_FILES = (
     "gkd_opd.py",
     "pg_opd.py",
+    "error_opd.py",
     "pri_opd.py",
     "sol_opd.py",
     "ps_opd.py",
@@ -17,10 +18,12 @@ ALGORITHM_FILES = (
     "fire_opd.py",
     "oa_opd.py",
     "fast_oa_opd.py",
+    "correct_opd.py",
 )
 
 CANONICAL_ALGORITHM_NAMES = {
     "pg_opd",
+    "error_opd",
     "pri_opd",
     "sol_opd",
     "gkd_opd",
@@ -32,6 +35,7 @@ CANONICAL_ALGORITHM_NAMES = {
     "fire_opd",
     "oa_opd",
     "fast_oa_opd",
+    "correct_opd",
 }
 
 
