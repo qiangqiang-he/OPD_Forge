@@ -9,6 +9,8 @@
 #   --teacher-key KEY (optional subset; repeat for several keys)
 #   --teacher-model PATH [--teacher-key KEY] (legacy single-Teacher override)
 #   --world-size N --gpu-memory-utilization 0.95
+# Namespaced environment overrides (optional): OA_OPD_WORLD_SIZE and
+# OA_OPD_GPU_IDS.  Generic WORLD_SIZE/GPU_IDS are intentionally ignored.
 # Advanced override only: --python PATH (normally use the already-activated env)
 #   --overwrite --validate-only --phase all --arm all --run-id ID
 #   --gpu-ids 0,1,2,3,4,5,6,7 (physical IDs; useful with a scheduler)
@@ -35,7 +37,19 @@ case "$OUTCOME" in
 esac
 
 PYTHON_BIN="${PYTHON_BIN:-}"
-WORLD_SIZE="${WORLD_SIZE:-}"
+# Do not inherit the generic WORLD_SIZE/GPU_IDS variables that are commonly
+# left behind by torchrun, Ray, or a previous one-GPU test.  Those variables
+# silently forced this launcher to start only one worker even when eight
+# physical GPUs were available.  Use the namespaced overrides below or the
+# explicit CLI flags instead.
+INHERITED_WORLD_SIZE="${WORLD_SIZE:-}"
+INHERITED_GPU_IDS="${GPU_IDS:-}"
+WORLD_SIZE="${OA_OPD_WORLD_SIZE:-}"
+GPU_IDS_CSV="${OA_OPD_GPU_IDS:-}"
+WORLD_SIZE_SOURCE="env:OA_OPD_WORLD_SIZE"
+GPU_IDS_SOURCE="env:OA_OPD_GPU_IDS"
+if [[ -z "$WORLD_SIZE" ]]; then WORLD_SIZE_SOURCE="auto"; fi
+if [[ -z "$GPU_IDS_CSV" ]]; then GPU_IDS_SOURCE="auto"; fi
 DATASET="$REPO_ROOT/data/${OUTCOME}_2000_trajectories_10000_steps.json"
 OUTPUT_ROOT="$REPO_ROOT/outputs/oa_opd_h20_avg128_20k"
 STUDENT_MODEL="$REPO_ROOT/models/Qwen3-1.7B"
@@ -55,7 +69,6 @@ HEARTBEAT_SECONDS="30.0"
 MEMORY_CHECK_SECONDS="2.0"
 MAX_MODEL_LEN="0"
 RUN_ID="${RUN_ID:-}"
-GPU_IDS_CSV="${GPU_IDS:-}"
 ORIGINAL_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}"
 
 while [[ $# -gt 0 ]]; do
@@ -66,7 +79,7 @@ while [[ $# -gt 0 ]]; do
     --teacher-model) [[ $# -ge 2 ]] || { echo "--teacher-model 需要路径" >&2; exit 2; }; TEACHER_MODEL="$2"; shift 2 ;;
     --teacher-key) [[ $# -ge 2 ]] || { echo "--teacher-key 需要名称" >&2; exit 2; }; TEACHER_KEYS+=("$2"); shift 2 ;;
     --python) [[ $# -ge 2 ]] || { echo "--python 需要路径" >&2; exit 2; }; PYTHON_BIN="$2"; shift 2 ;;
-    --world-size) [[ $# -ge 2 ]] || { echo "--world-size 需要整数" >&2; exit 2; }; WORLD_SIZE="$2"; shift 2 ;;
+    --world-size) [[ $# -ge 2 ]] || { echo "--world-size 需要整数" >&2; exit 2; }; WORLD_SIZE="$2"; WORLD_SIZE_SOURCE="cli"; shift 2 ;;
     --phase) [[ $# -ge 2 ]] || { echo "--phase 需要 all/proposals/continuations" >&2; exit 2; }; PHASE="$2"; shift 2 ;;
     --arm) [[ $# -ge 2 ]] || { echo "--arm 需要 all/keep/delete/replace" >&2; exit 2; }; ARM="$2"; shift 2 ;;
     --gpu-memory-utilization) [[ $# -ge 2 ]] || { echo "--gpu-memory-utilization 需要小数" >&2; exit 2; }; GPU_UTILIZATION="$2"; shift 2 ;;
@@ -75,7 +88,7 @@ while [[ $# -gt 0 ]]; do
     --memory-check-seconds) [[ $# -ge 2 ]] || { echo "--memory-check-seconds 需要数值" >&2; exit 2; }; MEMORY_CHECK_SECONDS="$2"; shift 2 ;;
     --max-model-len) [[ $# -ge 2 ]] || { echo "--max-model-len 需要整数" >&2; exit 2; }; MAX_MODEL_LEN="$2"; shift 2 ;;
     --run-id) [[ $# -ge 2 ]] || { echo "--run-id 需要字符串" >&2; exit 2; }; RUN_ID="$2"; shift 2 ;;
-    --gpu-ids) [[ $# -ge 2 ]] || { echo "--gpu-ids 需要逗号分隔的整数" >&2; exit 2; }; GPU_IDS_CSV="$2"; shift 2 ;;
+    --gpu-ids) [[ $# -ge 2 ]] || { echo "--gpu-ids 需要逗号分隔的整数" >&2; exit 2; }; GPU_IDS_CSV="$2"; GPU_IDS_SOURCE="cli"; shift 2 ;;
     --overwrite) OVERWRITE=1; shift ;;
     --validate-only) VALIDATE_ONLY=1; shift ;;
     -h|--help) sed -n '1,22p' "$0"; exit 0 ;;
@@ -92,16 +105,20 @@ if [[ -z "$WORLD_SIZE" ]]; then
   if [[ -n "$GPU_IDS_CSV" && "$GPU_IDS_CSV" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
     IFS=',' read -r -a _AUTO_GPU_IDS <<< "$GPU_IDS_CSV"
     WORLD_SIZE="${#_AUTO_GPU_IDS[@]}"
+    WORLD_SIZE_SOURCE="${GPU_IDS_SOURCE}"
   elif [[ -n "$ORIGINAL_CUDA_VISIBLE_DEVICES" &&
           "$ORIGINAL_CUDA_VISIBLE_DEVICES" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
     IFS=',' read -r -a _AUTO_GPU_IDS <<< "$ORIGINAL_CUDA_VISIBLE_DEVICES"
     WORLD_SIZE="${#_AUTO_GPU_IDS[@]}"
+    WORLD_SIZE_SOURCE="CUDA_VISIBLE_DEVICES"
   elif command -v nvidia-smi >/dev/null 2>&1; then
     WORLD_SIZE="$(nvidia-smi --query-gpu=index --format=csv,noheader,nounits | awk 'NF {count++} END {print count+0}')"
     if [[ "$WORLD_SIZE" -lt 1 ]]; then WORLD_SIZE=8; fi
+    WORLD_SIZE_SOURCE="nvidia-smi"
   else
     # Keep a useful fallback for validate-only runs on machines without CUDA.
     WORLD_SIZE=8
+    WORLD_SIZE_SOURCE="fallback"
   fi
 fi
 
@@ -167,14 +184,17 @@ fi
 GPU_ID_LIST=()
 if [[ -n "$GPU_IDS_CSV" ]]; then
   IFS=',' read -r -a GPU_ID_LIST <<< "$GPU_IDS_CSV"
+  GPU_IDS_SOURCE="${GPU_IDS_SOURCE:-explicit}"
 elif [[ -n "$ORIGINAL_CUDA_VISIBLE_DEVICES" &&
         "$ORIGINAL_CUDA_VISIBLE_DEVICES" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
   # Slurm/Docker commonly exposes a numeric subset through
   # CUDA_VISIBLE_DEVICES. Treat those values as physical IDs before each
   # child narrows visibility to one card.
   IFS=',' read -r -a GPU_ID_LIST <<< "$ORIGINAL_CUDA_VISIBLE_DEVICES"
+  GPU_IDS_SOURCE="CUDA_VISIBLE_DEVICES"
 else
   for ((worker=0; worker<WORLD_SIZE; worker++)); do GPU_ID_LIST+=("$worker"); done
+  GPU_IDS_SOURCE="0..$((WORLD_SIZE - 1))"
 fi
 if (( ${#GPU_ID_LIST[@]} != WORLD_SIZE )); then
   echo "GPU ID 数量 (${#GPU_ID_LIST[@]}) 必须等于 world-size ($WORLD_SIZE)" >&2
@@ -209,6 +229,8 @@ echo "run_id=$RUN_ID" | tee -a "$LOG_FILE"
 echo "python=$PYTHON_BIN" | tee -a "$LOG_FILE"
 echo "gpu_ids=${GPU_ID_LIST[*]}" | tee -a "$LOG_FILE"
 echo "world_size=$WORLD_SIZE, each call=2 prompts x 128 = 256 rollouts" | tee -a "$LOG_FILE"
+echo "gpu_detection_source=$WORLD_SIZE_SOURCE, gpu_ids_source=$GPU_IDS_SOURCE" | tee -a "$LOG_FILE"
+echo "ignored_generic_env: WORLD_SIZE=${INHERITED_WORLD_SIZE:-<unset>}, GPU_IDS=${INHERITED_GPU_IDS:-<unset>}, CUDA_VISIBLE_DEVICES=${ORIGINAL_CUDA_VISIBLE_DEVICES:-<unset>}" | tee -a "$LOG_FILE"
 echo "teacher proposal max tokens=1024, cumulative response max tokens=10240" | tee -a "$LOG_FILE"
 echo "arms=$ARM, phase=$PHASE, GPU reserve >=${MIN_FREE_GIB} GiB, utilization=${GPU_UTILIZATION}" | tee -a "$LOG_FILE"
 echo "============================================================" | tee -a "$LOG_FILE"
