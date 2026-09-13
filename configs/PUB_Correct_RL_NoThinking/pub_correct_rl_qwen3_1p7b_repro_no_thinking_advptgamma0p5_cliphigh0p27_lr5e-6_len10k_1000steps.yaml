@@ -1,15 +1,14 @@
-# Correct-RL: Qwen3-30B-A3B-Instruct-2507 Student rollout to Qwen3-4B.
+# Correct-RL: Student-only Qwen3-1.7B No-Thinking reproducibility run.
 
 defaults:
   - /base
   - _self_
 
-run_name: pub_correct_rl_qwen3_30b_a3b_instruct_2507_to_4b_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps
+run_name: pub_correct_rl_qwen3_1p7b_repro_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps
 group_name: PUB_Correct_RL_NoThinking
-run_name_prefix: pub_correct_rl_qwen3_30b_a3b_instruct_2507_to_4b_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps
+run_name_prefix: pub_correct_rl_qwen3_1p7b_repro_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps
 
 student_prompt: qwen3_no_thinking_prompt
-teacher_prompt: qwen3_no_thinking_prompt
 
 data:
   train_files: [./data/DAPO-17k.json]
@@ -18,7 +17,7 @@ data:
   max_response_length: 16384
 
 actor_rollout_ref:
-  model: {path: ./models/Qwen3-4B}
+  model: {path: ./models/Qwen3-1.7B}
   actor:
     ppo_max_token_len_per_gpu: 12289
     loss_agg_mode: seq-mean-token-mean

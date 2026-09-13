@@ -1,15 +1,14 @@
-# Correct-RL: Qwen3-4B-Instruct-2507 Student rollout to Qwen3-1.7B.
+# Correct-RL: Student-only Qwen3-1.7B No-Thinking training.
 
 defaults:
   - /base
   - _self_
 
-run_name: pub_correct_rl_qwen3_4b_instruct_2507_to_1p7b_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps
+run_name: pub_correct_rl_qwen3_1p7b_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps
 group_name: PUB_Correct_RL_NoThinking
-run_name_prefix: pub_correct_rl_qwen3_4b_instruct_2507_to_1p7b_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps
+run_name_prefix: pub_correct_rl_qwen3_1p7b_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps
 
 student_prompt: qwen3_no_thinking_prompt
-teacher_prompt: qwen3_no_thinking_prompt
 
 data:
   train_files: [./data/DAPO-17k.json]

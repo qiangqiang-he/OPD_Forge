@@ -172,8 +172,6 @@ def validate_correct_rl_config(config) -> None:
         raise ValueError(f"Correct-RL requires algorithm.name={CORRECT_RL_VARIANT}.")
     if str(config.get("student_prompt", "")) != "qwen3_no_thinking_prompt":
         raise ValueError("Correct-RL requires the No-Thinking Student prompt.")
-    if str(config.get("teacher_prompt", "")) != "qwen3_no_thinking_prompt":
-        raise ValueError("Correct-RL requires the No-Thinking Teacher prompt.")
 
     distillation = config.get("distillation", None)
     if distillation is not None and bool(distillation.get("enabled", False)):

@@ -215,7 +215,6 @@ def test_correct_rl_config_requires_no_reference_or_teacher():
                 "correct_rl_gamma": 0.5,
             },
             "student_prompt": "qwen3_no_thinking_prompt",
-            "teacher_prompt": "qwen3_no_thinking_prompt",
             "distillation": {"enabled": False},
             "actor_rollout_ref": {
                 "actor": {

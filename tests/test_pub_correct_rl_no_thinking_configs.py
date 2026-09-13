@@ -8,6 +8,13 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = PROJECT_ROOT / "configs" / "PUB_Correct_RL_NoThinking"
 CONFIG_NAMES = sorted(path.stem for path in CONFIG_DIR.glob("*.yaml"))
+EXPECTED_CONFIG_MODELS = {
+    "pub_correct_rl_qwen3_0p6b_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps": "Qwen3-0.6B",
+    "pub_correct_rl_qwen3_1p7b_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps": "Qwen3-1.7B",
+    "pub_correct_rl_qwen3_1p7b_repro_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps": "Qwen3-1.7B",
+    "pub_correct_rl_qwen3_4b_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps": "Qwen3-4B",
+    "pub_correct_rl_qwen3_8b_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps": "Qwen3-8B",
+}
 
 
 def _compose(config_name: str):
@@ -23,6 +30,9 @@ def _compose(config_name: str):
 
 def test_correct_rl_publication_has_five_configs():
     assert len(CONFIG_NAMES) == 5
+    assert set(CONFIG_NAMES) == set(EXPECTED_CONFIG_MODELS)
+    assert all("to_" not in name for name in CONFIG_NAMES)
+    assert all("instruct" not in name.lower() for name in CONFIG_NAMES)
 
 
 @pytest.mark.parametrize("config_name", CONFIG_NAMES)
@@ -32,6 +42,9 @@ def test_correct_rl_no_thinking_publication_contract(config_name):
     from algorithms import resolve_algorithm
     from verl.trainer import main_ppo_sync as verl_sync
 
+    config_file = CONFIG_DIR / f"{config_name}.yaml"
+    assert "teacher_prompt:" not in config_file.read_text(encoding="utf-8")
+
     config = _compose(config_name)
     OmegaConf.resolve(config)
 
@@ -40,6 +53,9 @@ def test_correct_rl_no_thinking_publication_contract(config_name):
     assert str(config.run_name_prefix) == config_name
     assert str(config.group_name) == "PUB_Correct_RL_NoThinking"
     assert str(config.algorithm.name) == "correct_rl"
+    assert str(config.actor_rollout_ref.model.path).endswith(
+        EXPECTED_CONFIG_MODELS[config_name]
+    )
     assert str(config.algorithm.adv_estimator) == "grpo"
     assert float(config.algorithm.correct_rl_gamma) == pytest.approx(0.5)
     assert int(config.rlvr_generation.train_max_new_tokens) == 10240
