@@ -236,6 +236,8 @@ MAX_NUM_SEQS = EXPANDED_ROLLOUTS_PER_GENERATE
 MAX_NUM_BATCHED_TOKENS = 32768
 STUDENT_BASENAME = "Qwen3-1.7B"
 TEACHER_BASENAME = "Qwen3-4B-Instruct-2507"
+WANDB_PROJECT = "OPD_Explore"
+WANDB_GROUP = "MC_Estimation"
 
 # Configure all Teachers for a multi-Teacher run here.  The dictionary key is
 # a stable, filesystem-safe identifier used in output paths; the value is the
@@ -2177,6 +2179,160 @@ def _monitor_arm_labels(
     raise ValueError(f"unsupported arm {args.arm!r}")
 
 
+def _wandb_init_monitor(
+    args: argparse.Namespace,
+    root: Path,
+    signature: str,
+    expected_cases: int,
+    teacher_models: dict[str, Path] | None,
+) -> Any | None:
+    """Create one W&B run for the aggregate CPU monitor.
+
+    Workers deliberately do not initialize W&B: a single aggregate run keeps
+    the project readable and avoids eight duplicate progress streams.  The API
+    key is supplied by the caller's environment (for example ``WANDB_API_KEY``)
+    and is never written or exported here.  If W&B is disabled or unavailable,
+    the file/terminal monitor continues to operate normally.
+    """
+
+    disabled = str(os.environ.get("WANDB_DISABLED", "")).strip().lower()
+    if disabled in {"1", "true", "yes", "on"}:
+        print(json.dumps({"event": "wandb_disabled"}, ensure_ascii=False), flush=True)
+        return None
+    try:
+        import wandb
+    except Exception as exc:
+        print(json.dumps({"event": "wandb_unavailable", "error": repr(exc)},
+                         ensure_ascii=False), flush=True)
+        return None
+
+    run_id = str(getattr(args, "run_id", ""))
+    name = f"{EXPERIMENT}_{args.outcome}_{run_id}".strip("_")
+    config = {
+        "experiment": EXPERIMENT,
+        "outcome": args.outcome,
+        "expected_selected_steps": int(expected_cases),
+        "world_size": int(args.world_size),
+        "samples_per_arm": SAMPLES_PER_ARM,
+        "prompts_per_generate": PROMPTS_PER_GENERATE,
+        "expanded_rollouts_per_generate": EXPANDED_ROLLOUTS_PER_GENERATE,
+        "max_response_tokens": MAX_RESPONSE_TOKENS,
+        "teacher_proposal_max_new_tokens": TEACHER_PROPOSAL_MAX_NEW_TOKENS,
+        "gpu_memory_utilization": float(args.gpu_memory_utilization),
+        "min_free_gpu_gib": float(args.min_free_gpu_gib),
+        "temperature": TEMPERATURE,
+        "top_p": TOP_P,
+        "top_k": TOP_K,
+        "config_signature": signature,
+        "output_root": str(root.resolve()),
+        "teacher_keys": list(teacher_models or {}),
+        "teacher_models": {
+            key: str(path) for key, path in (teacher_models or {}).items()
+        },
+    }
+    try:
+        run = wandb.init(
+            project=WANDB_PROJECT,
+            group=WANDB_GROUP,
+            name=name,
+            job_type="mc_estimation",
+            tags=["oa_opd", "avg128", str(args.outcome)],
+            config=config,
+        )
+    except Exception as exc:
+        print(json.dumps({"event": "wandb_init_failed", "error": repr(exc)},
+                         ensure_ascii=False), flush=True)
+        return None
+    print(json.dumps({
+        "event": "wandb_init",
+        "project": WANDB_PROJECT,
+        "group": WANDB_GROUP,
+        "name": name,
+        "run_id": getattr(run, "id", None),
+        "url": getattr(run, "url", None),
+    }, ensure_ascii=False), flush=True)
+    return run
+
+
+def _wandb_metric_label(label: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(label)).strip("_") or "arm"
+
+
+def _wandb_log_progress(
+    run: Any | None,
+    step: int,
+    *,
+    elapsed: float,
+    expected_cases: int,
+    proposal_target: int,
+    proposals_done: int,
+    proposal_success: int,
+    proposal_failed: int,
+    complete_workers: int,
+    total_workers: int,
+    arm_stats: dict[str, dict[str, int]],
+) -> None:
+    if run is None:
+        return
+    proposal_fraction = (
+        proposals_done / proposal_target if proposal_target else 1.0
+    )
+    metrics: dict[str, float | int] = {
+        "progress/elapsed_seconds": float(elapsed),
+        "progress/workers_complete": int(complete_workers),
+        "progress/workers_total": int(total_workers),
+        "progress/workers_fraction": (
+            complete_workers / total_workers if total_workers else 1.0
+        ),
+        "progress/proposal_completed_cases": int(proposals_done),
+        "progress/proposal_target_cases": int(proposal_target),
+        "progress/proposal_fraction": float(proposal_fraction),
+        "progress/proposal_success_cases": int(proposal_success),
+        "progress/proposal_failed_cases": int(proposal_failed),
+        "progress/complete": int(
+            complete_workers == total_workers
+            and proposal_fraction >= 1.0
+            and all(
+                int(stats.get("completed_cases", 0)) >= expected_cases
+                for stats in arm_stats.values()
+            )
+        ),
+    }
+    fractions: list[float] = []
+    for label, stats in arm_stats.items():
+        safe = _wandb_metric_label(label)
+        completed = int(stats.get("completed_cases", 0))
+        fraction = completed / expected_cases if expected_cases else 1.0
+        fractions.append(fraction)
+        metrics[f"arms/{safe}/completed_cases"] = completed
+        metrics[f"arms/{safe}/target_cases"] = int(expected_cases)
+        metrics[f"arms/{safe}/fraction"] = float(fraction)
+        metrics[f"arms/{safe}/generated_outputs"] = int(
+            stats.get("generated_outputs", 0)
+        )
+        metrics[f"arms/{safe}/skipped_cases"] = int(stats.get("skipped_cases", 0))
+    metrics["progress/arm_mean_fraction"] = (
+        sum(fractions) / len(fractions) if fractions else 1.0
+    )
+    try:
+        run.log(metrics, step=int(step), commit=True)
+    except Exception as exc:
+        # Network hiccups should not kill a multi-hour rollout collection; the
+        # durable JSON progress files remain the source of truth.
+        print(json.dumps({"event": "wandb_log_failed", "error": repr(exc)},
+                         ensure_ascii=False), flush=True)
+
+
+def _wandb_finish(run: Any | None) -> None:
+    if run is None:
+        return
+    try:
+        run.finish()
+    except Exception as exc:
+        print(json.dumps({"event": "wandb_finish_failed", "error": repr(exc)},
+                         ensure_ascii=False), flush=True)
+
+
 def monitor(
     args: argparse.Namespace,
     root: Path,
@@ -2201,116 +2357,187 @@ def monitor(
         args.phase == "all" and args.arm in {"all", "replace"}
     )
     proposal_target = expected_cases * (1 if legacy else teacher_count) if proposal_required else 0
+    wandb_run = _wandb_init_monitor(
+        args, root, signature, expected_cases, teacher_models
+    )
+    wandb_step = 0
 
-    while True:
-        rows = []
-        for worker in range(args.world_size):
-            path = _progress_path(root, worker)
-            if path.is_file():
-                with contextlib.suppress(Exception):
-                    row = load_json(path)
-                    if (row.get("config_signature") == signature
-                            and (not run_id or str(row.get("run_id", "")) == run_id)):
-                        rows.append(row)
-        proposals_done = sum(int(r.get("proposal", {}).get("completed_cases", 0)) for r in rows)
-        proposal_success = sum(int(r.get("proposal", {}).get("success_cases", 0)) for r in rows)
-        proposal_failed = sum(int(r.get("proposal", {}).get("failed_cases", 0)) for r in rows)
-        arm_stats: dict[str, dict[str, int]] = {}
-        for label in labels:
-            arm_stats[label] = {
-                "completed_cases": sum(int(r.get("continuations", {}).get(label, {}).get("completed_cases", 0)) for r in rows),
-                "generated_outputs": sum(int(r.get("continuations", {}).get(label, {}).get("generated_outputs", 0)) for r in rows),
-                "skipped_cases": sum(int(r.get("continuations", {}).get(label, {}).get("skipped_cases", 0)) for r in rows),
-            }
-        elapsed = max(1e-6, time.monotonic() - started)
-        complete_workers = sum(r.get("status") == "complete" for r in rows)
-        arm_eta: dict[str, float | None] = {}
-        for label in labels:
-            done = arm_stats[label]["completed_cases"]
-            rate = done / elapsed
-            arm_eta[label] = (expected_cases - done) / rate if rate > 0 else None
-        proposal_pct = 100.0 * proposals_done / proposal_target if proposal_target else 100.0
-        proposal_text = (
-            f"proposal={proposals_done}/{proposal_target} ({proposal_pct:.1f}%,"
-            f"ok={proposal_success},fail={proposal_failed})"
-        )
-        arm_text = " ".join(
-            f"{label}={arm_stats[label]['completed_cases']}/{expected_cases} "
-            f"({100.0 * arm_stats[label]['completed_cases'] / expected_cases:.1f}%),"
-            f"out={arm_stats[label]['generated_outputs']},skip={arm_stats[label]['skipped_cases']},"
-            f"ETA={arm_eta[label] / 60:.1f}m"
-            if arm_eta[label] is not None else
-            f"{label}=0/{expected_cases} (0.0%),out=0,skip=0,ETA=?"
-            for label in labels
-        )
-        line = (
-            f"MONITOR outcome={args.outcome} workers={complete_workers}/{args.world_size} "
-            f"{proposal_text} {arm_text}"
-        ).rstrip()
-        if line != last_line:
-            print(line + f" elapsed={elapsed / 60:.1f}m", flush=True)
-            last_line = line
-        atomic_json(root / "progress.json", {
-            "schema_version": SCHEMA_VERSION,
-            "experiment": EXPERIMENT,
-            "config_signature": signature,
-            "run_id": run_id,
-            "status": "running",
-            "workers_seen": len(rows),
-            "proposal_target_cases": proposal_target,
-            "proposal_completed_cases": proposals_done,
-            "proposal_success_cases": proposal_success,
-            "proposal_failed_cases": proposal_failed,
-            "teacher_keys": list(teacher_models or {}),
-            "arms": arm_stats,
-            "updated_at": utc_now(),
-        })
-        proposal_complete = (not proposal_required) or proposals_done >= proposal_target
-        arms_complete = all(
-            arm_stats[label]["completed_cases"] >= expected_cases for label in labels
-        )
-        if complete_workers == args.world_size and proposal_complete and arms_complete:
-            summary = {
-                "outcome": args.outcome,
-                "workers": args.world_size,
-                "proposal_target_cases": proposal_target,
-                "proposal_success": proposal_success,
-                "proposal_failures": proposal_failed,
-                "arms": arm_stats,
-                "elapsed_seconds": round(elapsed, 2),
-            }
-            print("MONITOR COMPLETE " + json.dumps(summary, ensure_ascii=False), flush=True)
+    try:
+        while True:
+            rows = []
+            for worker in range(args.world_size):
+                path = _progress_path(root, worker)
+                if path.is_file():
+                    with contextlib.suppress(Exception):
+                        row = load_json(path)
+                        if (
+                            row.get("config_signature") == signature
+                            and (
+                                not run_id
+                                or str(row.get("run_id", "")) == run_id
+                            )
+                        ):
+                            rows.append(row)
+            proposals_done = sum(
+                int(r.get("proposal", {}).get("completed_cases", 0))
+                for r in rows
+            )
+            proposal_success = sum(
+                int(r.get("proposal", {}).get("success_cases", 0))
+                for r in rows
+            )
+            proposal_failed = sum(
+                int(r.get("proposal", {}).get("failed_cases", 0))
+                for r in rows
+            )
+            arm_stats: dict[str, dict[str, int]] = {}
+            for label in labels:
+                arm_stats[label] = {
+                    "completed_cases": sum(
+                        int(
+                            r.get("continuations", {})
+                            .get(label, {})
+                            .get("completed_cases", 0)
+                        )
+                        for r in rows
+                    ),
+                    "generated_outputs": sum(
+                        int(
+                            r.get("continuations", {})
+                            .get(label, {})
+                            .get("generated_outputs", 0)
+                        )
+                        for r in rows
+                    ),
+                    "skipped_cases": sum(
+                        int(
+                            r.get("continuations", {})
+                            .get(label, {})
+                            .get("skipped_cases", 0)
+                        )
+                        for r in rows
+                    ),
+                }
+            elapsed = max(1e-6, time.monotonic() - started)
+            complete_workers = sum(r.get("status") == "complete" for r in rows)
+            arm_eta: dict[str, float | None] = {}
+            for label in labels:
+                done = arm_stats[label]["completed_cases"]
+                rate = done / elapsed
+                arm_eta[label] = (expected_cases - done) / rate if rate > 0 else None
+            proposal_pct = 100.0 * proposals_done / proposal_target if proposal_target else 100.0
+            proposal_text = (
+                f"proposal={proposals_done}/{proposal_target} ({proposal_pct:.1f}%,"
+                f"ok={proposal_success},fail={proposal_failed})"
+            )
+            arm_text = " ".join(
+                f"{label}={arm_stats[label]['completed_cases']}/{expected_cases} "
+                f"({100.0 * arm_stats[label]['completed_cases'] / expected_cases:.1f}%),"
+                f"out={arm_stats[label]['generated_outputs']},"
+                f"skip={arm_stats[label]['skipped_cases']},"
+                f"ETA={arm_eta[label] / 60:.1f}m"
+                if arm_eta[label] is not None
+                else f"{label}=0/{expected_cases} (0.0%),out=0,skip=0,ETA=?"
+                for label in labels
+            )
+            line = (
+                f"MONITOR outcome={args.outcome} "
+                f"workers={complete_workers}/{args.world_size} "
+                f"{proposal_text} {arm_text}"
+            ).rstrip()
+            if line != last_line:
+                print(line + f" elapsed={elapsed / 60:.1f}m", flush=True)
+                last_line = line
+            wandb_step += 1
+            _wandb_log_progress(
+                wandb_run,
+                wandb_step,
+                elapsed=elapsed,
+                expected_cases=expected_cases,
+                proposal_target=proposal_target,
+                proposals_done=proposals_done,
+                proposal_success=proposal_success,
+                proposal_failed=proposal_failed,
+                complete_workers=complete_workers,
+                total_workers=args.world_size,
+                arm_stats=arm_stats,
+            )
             atomic_json(root / "progress.json", {
                 "schema_version": SCHEMA_VERSION,
                 "experiment": EXPERIMENT,
                 "config_signature": signature,
                 "run_id": run_id,
-                "status": "complete",
-                "workers": rows,
-                "teacher_keys": list(teacher_models or {}),
-                "arms": arm_stats,
+                "status": "running",
+                "workers_seen": len(rows),
                 "proposal_target_cases": proposal_target,
-                "proposal_success": proposal_success,
-                "proposal_failures": proposal_failed,
-                "updated_at": utc_now(),
-            })
-            atomic_json(root / "summary.json", {
-                "schema_version": SCHEMA_VERSION,
-                "experiment": EXPERIMENT,
-                "outcome": args.outcome,
-                "config_signature": signature,
-                "run_id": run_id,
-                "status": "complete",
-                "selected_steps": expected_cases,
-                "teacher_keys": list(teacher_models or {}),
-                "proposal_target_cases": proposal_target,
+                "proposal_completed_cases": proposals_done,
                 "proposal_success_cases": proposal_success,
                 "proposal_failed_cases": proposal_failed,
+                "teacher_keys": list(teacher_models or {}),
                 "arms": arm_stats,
                 "updated_at": utc_now(),
             })
-            return
-        time.sleep(5.0)
+            proposal_complete = (not proposal_required) or proposals_done >= proposal_target
+            arms_complete = all(
+                arm_stats[label]["completed_cases"] >= expected_cases for label in labels
+            )
+            if complete_workers == args.world_size and proposal_complete and arms_complete:
+                summary = {
+                    "outcome": args.outcome,
+                    "workers": args.world_size,
+                    "proposal_target_cases": proposal_target,
+                    "proposal_success": proposal_success,
+                    "proposal_failures": proposal_failed,
+                    "arms": arm_stats,
+                    "elapsed_seconds": round(elapsed, 2),
+                }
+                _wandb_log_progress(
+                    wandb_run,
+                    wandb_step + 1,
+                    elapsed=elapsed,
+                    expected_cases=expected_cases,
+                    proposal_target=proposal_target,
+                    proposals_done=proposals_done,
+                    proposal_success=proposal_success,
+                    proposal_failed=proposal_failed,
+                    complete_workers=complete_workers,
+                    total_workers=args.world_size,
+                    arm_stats=arm_stats,
+                )
+                print("MONITOR COMPLETE " + json.dumps(summary, ensure_ascii=False), flush=True)
+                atomic_json(root / "progress.json", {
+                    "schema_version": SCHEMA_VERSION,
+                    "experiment": EXPERIMENT,
+                    "config_signature": signature,
+                    "run_id": run_id,
+                    "status": "complete",
+                    "workers": rows,
+                    "teacher_keys": list(teacher_models or {}),
+                    "arms": arm_stats,
+                    "proposal_target_cases": proposal_target,
+                    "proposal_success": proposal_success,
+                    "proposal_failures": proposal_failed,
+                    "updated_at": utc_now(),
+                })
+                atomic_json(root / "summary.json", {
+                    "schema_version": SCHEMA_VERSION,
+                    "experiment": EXPERIMENT,
+                    "outcome": args.outcome,
+                    "config_signature": signature,
+                    "run_id": run_id,
+                    "status": "complete",
+                    "selected_steps": expected_cases,
+                    "teacher_keys": list(teacher_models or {}),
+                    "proposal_target_cases": proposal_target,
+                    "proposal_success_cases": proposal_success,
+                    "proposal_failed_cases": proposal_failed,
+                    "arms": arm_stats,
+                    "updated_at": utc_now(),
+                })
+                return
+            time.sleep(5.0)
+    finally:
+        _wandb_finish(wandb_run)
 
 
 def install_shutdown_handler() -> None:
