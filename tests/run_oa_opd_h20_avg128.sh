@@ -7,7 +7,7 @@
 # Optional flags: --dataset PATH --output-root PATH --student-model PATH
 #   --teacher-key KEY (optional subset; repeat for several keys)
 #   --teacher-model PATH [--teacher-key KEY] (legacy single-Teacher override)
-#   --world-size 8 --python PATH --gpu-memory-utilization 0.90
+#   --world-size N --python PATH --gpu-memory-utilization 0.95
 #   --overwrite --validate-only --phase all --arm all --run-id ID
 #   --gpu-ids 0,1,2,3,4,5,6,7 (physical IDs; useful with a scheduler)
 
@@ -33,7 +33,7 @@ case "$OUTCOME" in
 esac
 
 PYTHON_BIN="${PYTHON_BIN:-}"
-WORLD_SIZE="${WORLD_SIZE:-8}"
+WORLD_SIZE="${WORLD_SIZE:-}"
 DATASET="$REPO_ROOT/data/${OUTCOME}_2000_trajectories_10000_steps.json"
 OUTPUT_ROOT="$REPO_ROOT/outputs/oa_opd_h20_avg128_20k"
 STUDENT_MODEL="$REPO_ROOT/models/Qwen3-1.7B"
@@ -43,8 +43,12 @@ PHASE="all"
 ARM="all"
 OVERWRITE=0
 VALIDATE_ONLY=0
-GPU_UTILIZATION="0.90"
-MIN_FREE_GIB="5.0"
+GPU_UTILIZATION="${GPU_UTILIZATION:-0.95}"
+# The H20 server profile has 96 GiB per GPU, so it does not reserve the local
+# workstation's 5 GiB.  The value is auto-selected after argument parsing:
+# 0 GiB for >=80 GiB cards (H20), 5 GiB for smaller/local cards.  Set
+# MIN_FREE_GIB explicitly, or pass --min-free-gpu-gib, to override it.
+MIN_FREE_GIB="${MIN_FREE_GIB:-}"
 HEARTBEAT_SECONDS="30.0"
 MEMORY_CHECK_SECONDS="2.0"
 MAX_MODEL_LEN="0"
@@ -76,6 +80,45 @@ while [[ $# -gt 0 ]]; do
     *) echo "未知选项: $1" >&2; exit 2 ;;
   esac
 done
+
+# Unless explicitly set, use every GPU visible to this process.  A scheduler
+# may expose a numeric CUDA_VISIBLE_DEVICES subset; GPU_IDS takes precedence
+# when supplied explicitly.  This detection intentionally happens *after*
+# parsing CLI flags so ``--gpu-ids`` can select a smaller subset without an
+# accidental world-size mismatch.
+if [[ -z "$WORLD_SIZE" ]]; then
+  if [[ -n "$GPU_IDS_CSV" && "$GPU_IDS_CSV" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+    IFS=',' read -r -a _AUTO_GPU_IDS <<< "$GPU_IDS_CSV"
+    WORLD_SIZE="${#_AUTO_GPU_IDS[@]}"
+  elif [[ -n "$ORIGINAL_CUDA_VISIBLE_DEVICES" &&
+          "$ORIGINAL_CUDA_VISIBLE_DEVICES" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+    IFS=',' read -r -a _AUTO_GPU_IDS <<< "$ORIGINAL_CUDA_VISIBLE_DEVICES"
+    WORLD_SIZE="${#_AUTO_GPU_IDS[@]}"
+  elif command -v nvidia-smi >/dev/null 2>&1; then
+    WORLD_SIZE="$(nvidia-smi --query-gpu=index --format=csv,noheader,nounits | awk 'NF {count++} END {print count+0}')"
+    if [[ "$WORLD_SIZE" -lt 1 ]]; then WORLD_SIZE=8; fi
+  else
+    # Keep a useful fallback for validate-only runs on machines without CUDA.
+    WORLD_SIZE=8
+  fi
+fi
+
+if [[ -z "$MIN_FREE_GIB" ]]; then
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    MIN_GPU_TOTAL_MIB="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | awk '
+      NF {value = $1 + 0; if (min == 0 || value < min) min = value}
+      END {print min + 0}'
+    )"
+    if [[ "$MIN_GPU_TOTAL_MIB" =~ ^[0-9]+$ && "$MIN_GPU_TOTAL_MIB" -ge 81920 ]]; then
+      MIN_FREE_GIB="0.0"
+    else
+      MIN_FREE_GIB="5.0"
+    fi
+  else
+    # Preserve the conservative local default when CUDA is unavailable.
+    MIN_FREE_GIB="5.0"
+  fi
+fi
 
 if [[ -z "$PYTHON_BIN" ]]; then
   if command -v python >/dev/null 2>&1; then
@@ -157,7 +200,7 @@ echo "run_id=$RUN_ID" | tee -a "$LOG_FILE"
 echo "gpu_ids=${GPU_ID_LIST[*]}" | tee -a "$LOG_FILE"
 echo "world_size=$WORLD_SIZE, each call=2 prompts x 128 = 256 rollouts" | tee -a "$LOG_FILE"
 echo "teacher proposal max tokens=1024, cumulative response max tokens=10240" | tee -a "$LOG_FILE"
-echo "arms=$ARM, phase=$PHASE, GPU reserve >=5 GiB" | tee -a "$LOG_FILE"
+echo "arms=$ARM, phase=$PHASE, GPU reserve >=${MIN_FREE_GIB} GiB, utilization=${GPU_UTILIZATION}" | tee -a "$LOG_FILE"
 echo "============================================================" | tee -a "$LOG_FILE"
 
 # The Python worker maps each physical --gpu-id to a single visible device.

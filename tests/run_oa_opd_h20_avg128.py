@@ -818,7 +818,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--heartbeat-seconds", type=float, default=30.0)
     parser.add_argument("--memory-check-seconds", type=float, default=2.0)
     parser.add_argument("--min-free-gpu-gib", type=float, default=MIN_FREE_GPU_GIB)
-    parser.add_argument("--gpu-memory-utilization", type=float, default=0.90)
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.95)
     parser.add_argument("--max-model-len", type=int, default=0)
     parser.add_argument(
         "--run-id",
@@ -836,8 +836,8 @@ def validate_args(
         raise ValueError("worker-id must lie in [0, world-size)")
     if args.gpu_id < 0:
         raise ValueError("gpu-id must be nonnegative")
-    if args.min_free_gpu_gib < MIN_FREE_GPU_GIB:
-        raise ValueError("at least 5 GiB of GPU memory must remain free")
+    if args.min_free_gpu_gib < 0.0:
+        raise ValueError("min-free-gpu-gib must be nonnegative")
     if not 0.0 < args.gpu_memory_utilization < 1.0:
         raise ValueError("gpu-memory-utilization must lie in (0,1)")
     if args.heartbeat_seconds < args.memory_check_seconds or args.memory_check_seconds <= 0:
@@ -1612,6 +1612,8 @@ def _write_run_manifest(root: Path, args: argparse.Namespace, dataset: Path,
            if len(normalized_teachers) == 1 else {}),
         "max_response_tokens": MAX_RESPONSE_TOKENS,
         "teacher_proposal_max_new_tokens": TEACHER_PROPOSAL_MAX_NEW_TOKENS,
+        "gpu_memory_utilization": float(args.gpu_memory_utilization),
+        "min_free_gpu_gib": float(args.min_free_gpu_gib),
         "temperature": TEMPERATURE,
         "top_p": TOP_P,
         "top_k": TOP_K,
@@ -2392,6 +2394,8 @@ def main() -> None:
                       "teacher_keys": list(teacher_models),
                       "max_response_tokens": MAX_RESPONSE_TOKENS,
                       "teacher_proposal_max_new_tokens": TEACHER_PROPOSAL_MAX_NEW_TOKENS,
+                      "gpu_memory_utilization": float(args.gpu_memory_utilization),
+                      "min_free_gpu_gib": float(args.min_free_gpu_gib),
                       "dataset_preparation_caps": {
                           "max_response_tokens": metadata.get("max_response_tokens"),
                           "teacher_proposal_max_new_tokens": metadata.get(
