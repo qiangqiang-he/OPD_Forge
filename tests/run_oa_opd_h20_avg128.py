@@ -246,7 +246,7 @@ TEACHER_BASENAME = "Qwen3-4B-Instruct-2507"
 # Teacher so old launch commands remain valid.
 TEACHER_MODELS: dict[str, Path | str] = {
     "qwen3_4b_instruct_2507": "/models/Qwen3-4B-Instruct-2507",
-    "Qwen3-30B-A3B-Instruct-2507-FP8": "/models/Qwen3-30B-A3B-Instruct-2507-FP8",
+    "qwen3_30b_a3b_instruct_2507_fp8": "/models/Qwen3-30B-A3B-Instruct-2507-FP8",
 }
 
 # Keep the exact generated token IDs and the decoded complete response for
