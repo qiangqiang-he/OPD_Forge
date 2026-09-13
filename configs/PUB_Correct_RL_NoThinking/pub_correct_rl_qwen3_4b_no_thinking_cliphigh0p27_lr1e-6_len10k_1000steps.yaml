@@ -1,12 +1,12 @@
-# Correct-RL: Student-only Qwen3-8B No-Thinking training.
+# Correct-RL: Student-only Qwen3-4B No-Thinking training (non-Instruct).
 
 defaults:
   - /base
   - _self_
 
-run_name: pub_correct_rl_qwen3_8b_no_thinking_advptgamma0p25_cliphigh0p27_lr1e-6_len10k_1000steps
+run_name: pub_correct_rl_qwen3_4b_no_thinking_cliphigh0p27_lr1e-6_len10k_1000steps
 group_name: PUB_Correct_RL_NoThinking
-run_name_prefix: pub_correct_rl_qwen3_8b_no_thinking_advptgamma0p25_cliphigh0p27_lr1e-6_len10k_1000steps
+run_name_prefix: pub_correct_rl_qwen3_4b_no_thinking_cliphigh0p27_lr1e-6_len10k_1000steps
 
 student_prompt: qwen3_no_thinking_prompt
 
@@ -17,7 +17,7 @@ data:
   max_response_length: 16384
 
 actor_rollout_ref:
-  model: {path: ./models/Qwen3-8B}
+  model: {path: ./models/Qwen3-4B}
   actor:
     ppo_max_token_len_per_gpu: 12289
     loss_agg_mode: seq-mean-token-mean
@@ -26,7 +26,7 @@ actor_rollout_ref:
     clip_ratio_high: 0.27
     policy_loss: {loss_mode: vanilla}
     use_kl_loss: false
-    optim: {lr: 1.0e-6}
+    optim: {lr: 1.0e-6, clip_grad: 0.5}
   rollout:
     temperature: 1.0
     top_p: 1.0
@@ -41,7 +41,6 @@ algorithm:
   name: correct_rl
   adv_estimator: grpo
   use_kl_in_reward: false
-  correct_rl_gamma: 0.25
 
 rlvr_generation: {train_max_new_tokens: 10240, val_max_new_tokens: 16384}
 

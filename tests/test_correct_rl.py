@@ -16,15 +16,9 @@ def test_correct_rl_marks_only_correct_tokens_and_reports_accuracy():
     rm_scores = torch.tensor(
         [[0.0, 1.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
     )
-    old_log_probs = torch.log(
-        torch.tensor(
-            [[0.25, 0.25, 0.25], [0.5, 0.5, 1.0], [0.125, 1.0, 1.0], [1.0, 1.0, 1.0]]
-        )
-    )
     result = compute_correct_rl_batch(
         rm_scores,
         response_mask,
-        old_log_probs,
         genuine_trajectory_mask=torch.tensor([True, True, True, False]),
     )
 
@@ -38,28 +32,29 @@ def test_correct_rl_marks_only_correct_tokens_and_reports_accuracy():
             [[1, 1, 1], [0, 0, 0], [1, 0, 0], [0, 0, 0]], dtype=torch.bool
         ),
     )
+    # Correct-RL uses a fixed unit advantage on every valid token in a
+    # verifier-correct trajectory.  Incorrect and padding trajectories are
+    # completely masked out.
     expected_advantages = torch.tensor(
-        [
-            [(1.0 - 0.25) ** 0.25] * 3,
-            [0.0, 0.0, 0.0],
-            [(1.0 - 0.125) ** 0.25, 0.0, 0.0],
-            [0.0, 0.0, 0.0],
-        ]
+        [[1.0, 1.0, 1.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
     )
     torch.testing.assert_close(result.advantages, expected_advantages)
-    assert result.advantages[0, 0] < result.advantages[2, 0]
     assert result.correct_count == 2
     assert result.genuine_count == 3
-    assert result.loss_normalization == pytest.approx(0.5)
+    # The sequence denominator is the total number of genuine trajectories,
+    # not the number of correct trajectories, so low-accuracy batches do not
+    # amplify the update.
+    assert result.loss_normalization == pytest.approx(1.0 / 3.0)
     assert result.metrics["correct-rl/train/accuracy"] == pytest.approx(2 / 3)
     assert result.metrics["correct-rl/train/correct_response_length_mean"] == pytest.approx(2.0)
+    assert "correct-rl/train/token_probability_mean" not in result.metrics
+    assert "correct-rl/train/advantage_gamma" not in result.metrics
 
 
 def test_correct_rl_all_incorrect_batch_has_zero_count_without_division_error():
     result = compute_correct_rl_batch(
         torch.zeros((2, 3)),
         torch.ones((2, 3), dtype=torch.bool),
-        torch.log(torch.full((2, 3), 0.5)),
     )
     assert result.correct_count == 0
     assert result.loss_normalization == 0.0
@@ -111,12 +106,15 @@ def _ppo_data(response_mask, correct_mask, old_log_probs, advantages):
         data,
         dp_size=1,
         batch_num_tokens=int(response_mask.sum().item()),
-        global_batch_size=int(correct_mask.any(dim=-1).sum().item()),
+        # Correct-RL's reducer divides by all trajectories in the batch.  The
+        # correctness mask still gates gradients, but must not determine the
+        # denominator.
+        global_batch_size=int(response_mask.shape[0]),
     )
     return data
 
 
-def test_correct_rl_ppo_loss_uses_correct_count_and_zeroes_wrong_gradients():
+def test_correct_rl_ppo_loss_uses_total_count_and_zeroes_wrong_gradients():
     from verl.workers.utils import losses
 
     response_mask = torch.ones((3, 3), dtype=torch.bool)
@@ -131,9 +129,10 @@ def test_correct_rl_ppo_loss_uses_correct_count_and_zeroes_wrong_gradients():
 
     with patch.object(losses, "no_padding_2_padding", lambda value, _data: value):
         loss, metrics = losses.ppo_loss(_ppo_config(), {"log_probs": log_probs}, data)
-    # Each correct trajectory contributes -1 after its own token mean; the
-    # two correct trajectories are averaged by the correct count (2), not 3.
-    assert loss.detach().item() == pytest.approx(-1.0)
+    # Each correct trajectory contributes -1 after its own token mean.  The
+    # two correct trajectories are averaged by the total trajectory count (3),
+    # yielding -2/3; the incorrect trajectory contributes no gradient.
+    assert loss.detach().item() == pytest.approx(-2.0 / 3.0)
     loss.backward()
     torch.testing.assert_close(log_probs.grad[1], torch.zeros_like(log_probs.grad[1]))
     assert "actor/pg_loss" in metrics
@@ -212,7 +211,6 @@ def test_correct_rl_config_requires_no_reference_or_teacher():
                 "name": "correct_rl",
                 "adv_estimator": "grpo",
                 "use_kl_in_reward": False,
-                "correct_rl_gamma": 0.25,
             },
             "student_prompt": "qwen3_no_thinking_prompt",
             "distillation": {"enabled": False},
@@ -224,6 +222,7 @@ def test_correct_rl_config_requires_no_reference_or_teacher():
                     "clip_ratio_high": 0.27,
                     "policy_loss": {"loss_mode": "vanilla"},
                     "use_kl_loss": False,
+                    "optim": {"clip_grad": 0.5},
                 }
             },
         }

@@ -1,12 +1,10 @@
 """Outcome-filtered GRPO/REINFORCE on the Student policy.
 
-Correct-RL keeps only verifier-correct rollouts.  A valid response token in a
-correct rollout receives ``(1 - p_t) ** gamma`` where ``p_t`` is the Student's
-original token probability and ``gamma`` defaults to 0.25; incorrect rollouts
+Correct-RL keeps only verifier-correct rollouts.  Every valid response token in
+a correct rollout receives the fixed advantage ``1``; incorrect rollouts
 receive no policy gradient.  The standard ``seq-mean-token-mean`` reducer then
-averages tokens within each trajectory and, with ``global_batch_size`` set to
-the global number of correct trajectories, averages the remaining trajectories
-equally.
+averages tokens within each trajectory and averages trajectories over the
+complete (non-padding) batch, so a low accuracy does not amplify the update.
 
 Unlike the OPD algorithms this variant does not use a Teacher or a reference
 policy.  It reuses VERL's normal actor/rollout path and its PPO clipped policy
@@ -15,7 +13,6 @@ loss (configured with a 0.2 lower and 0.27 upper clipping ratio).
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import torch
@@ -29,7 +26,7 @@ CORRECT_RL_VARIANT = "correct_rl"
 CORRECT_RL_CLIP_RATIO = 0.2
 CORRECT_RL_CLIP_RATIO_LOW = 0.2
 CORRECT_RL_CLIP_RATIO_HIGH = 0.27
-CORRECT_RL_GAMMA = 0.25
+CORRECT_RL_MAX_GRAD_NORM = 0.5
 
 
 @dataclass(frozen=True)
@@ -49,34 +46,26 @@ class CorrectRLBatchResult:
 def compute_correct_rl_batch(
     rm_scores: torch.Tensor,
     response_mask: torch.Tensor,
-    old_log_probs: torch.Tensor,
     *,
     genuine_trajectory_mask: torch.Tensor | None = None,
-    gamma: float = CORRECT_RL_GAMMA,
 ) -> CorrectRLBatchResult:
-    """Build the probability-weighted Correct-RL signal.
+    """Build the fixed-advantage Correct-RL signal.
 
     A trajectory is correct when its token-level verifier score sums to more
-    than ``0.5``.  For each valid token in a correct trajectory,
-    ``advantage = (1 - exp(old_log_prob)) ** gamma``; all other positions
-    receive zero.  The actor's ``seq-mean-token-mean`` reducer performs the
-    per-trajectory length normalization, while the trainer supplies the global
-    correct count as its sequence denominator.
+    than ``0.5``.  Every valid token in a correct trajectory receives advantage
+    ``1``; all other positions receive zero.  The actor's
+    ``seq-mean-token-mean`` reducer performs the per-trajectory length
+    normalization, while the trainer uses the complete batch trajectory count
+    as its sequence denominator.
     """
 
-    if rm_scores.ndim != 2 or response_mask.ndim != 2 or old_log_probs.ndim != 2:
+    if rm_scores.ndim != 2 or response_mask.ndim != 2:
+        raise ValueError("Correct-RL rm_scores and response_mask must be 2-D tensors.")
+    if rm_scores.shape != response_mask.shape:
         raise ValueError(
-            "Correct-RL rm_scores, response_mask, and old_log_probs must be 2-D tensors."
+            "Correct-RL rm_scores and response_mask must have identical shapes; got "
+            f"{tuple(rm_scores.shape)} and {tuple(response_mask.shape)}."
         )
-    if rm_scores.shape != response_mask.shape or old_log_probs.shape != response_mask.shape:
-        raise ValueError(
-            "Correct-RL rm_scores, response_mask, and old_log_probs must have identical "
-            f"shapes; got {tuple(rm_scores.shape)}, {tuple(response_mask.shape)}, and "
-            f"{tuple(old_log_probs.shape)}."
-        )
-    gamma_value = float(gamma)
-    if not math.isfinite(gamma_value) or gamma_value < 0:
-        raise ValueError(f"Correct-RL gamma must be finite and non-negative, got {gamma}.")
 
     response_mask = response_mask.bool()
     batch_size = response_mask.shape[0]
@@ -104,10 +93,6 @@ def compute_correct_rl_batch(
     rm_scores_float = rm_scores.float()
     if not bool(torch.isfinite(rm_scores_float[genuine_tokens]).all()):
         raise ValueError("Correct-RL verifier scores must be finite on valid tokens.")
-    old_log_probs_float = old_log_probs.float()
-    valid_old_log_probs = old_log_probs_float[genuine_tokens]
-    if bool(torch.isnan(valid_old_log_probs).any()) or bool(torch.isposinf(valid_old_log_probs).any()):
-        raise ValueError("Correct-RL old log probabilities must not contain NaN or +inf.")
 
     trajectory_lengths = response_mask.sum(dim=-1).to(torch.float32)
     # Verifier scores outside the valid response span (e.g. padding) must not
@@ -117,25 +102,20 @@ def compute_correct_rl_batch(
     correct_rollout_mask = genuine_trajectory_mask & rollout_correct
     token_mask = response_mask & correct_rollout_mask.unsqueeze(-1)
     with torch.no_grad():
-        safe_old_log_probs = torch.where(
-            genuine_tokens, old_log_probs_float, torch.zeros_like(old_log_probs_float)
-        )
-        token_probabilities = safe_old_log_probs.exp().clamp_(min=0.0, max=1.0)
-        advantages = (
-            (1.0 - token_probabilities).clamp_min(0.0).pow(gamma_value) * token_mask
-        ).to(dtype=rm_scores.dtype)
+        advantages = token_mask.to(dtype=rm_scores.dtype)
 
     correct_count = int(correct_rollout_mask.sum().item())
     incorrect_count = genuine_count - correct_count
     correct_token_count = int(token_mask.sum().item())
     accuracy = float(correct_count) / float(genuine_count)
-    loss_normalization = 1.0 / float(correct_count) if correct_count > 0 else 0.0
+    # Keep the denominator tied to the full non-padding batch.  Filtering out
+    # incorrect trajectories from the token mask must not amplify updates when
+    # accuracy is low.  A batch with no correct trajectories reports zero and
+    # is handled as an intentional no-op by the trainer.
+    loss_normalization = 1.0 / float(genuine_count) if correct_count > 0 else 0.0
     correct_lengths = trajectory_lengths[correct_rollout_mask]
     correct_response_length_mean = (
         float(correct_lengths.mean().item()) if correct_lengths.numel() else 0.0
-    )
-    correct_token_probability_mean = (
-        float(token_probabilities[token_mask].mean().item()) if correct_token_count else 0.0
     )
     correct_advantage_mean = (
         float(advantages[token_mask].float().mean().item()) if correct_token_count else 0.0
@@ -149,9 +129,7 @@ def compute_correct_rl_batch(
         "correct-rl/train/correct_token_count": float(correct_token_count),
         "correct-rl/train/correct_response_length_mean": correct_response_length_mean,
         "correct-rl/train/loss_normalization": loss_normalization,
-        "correct-rl/train/token_probability_mean": correct_token_probability_mean,
         "correct-rl/train/advantage_mean": correct_advantage_mean,
-        "correct-rl/train/advantage_gamma": gamma_value,
     }
     return CorrectRLBatchResult(
         correct_rollout_mask=correct_rollout_mask,
@@ -197,10 +175,12 @@ def validate_correct_rl_config(config) -> None:
         value = float(actor.get(field, expected))
         if abs(value - expected) > 1.0e-12:
             raise ValueError(f"Correct-RL requires actor.{field}={expected}, got {value}.")
-    gamma = float(config.algorithm.get("correct_rl_gamma", CORRECT_RL_GAMMA))
-    if abs(gamma - CORRECT_RL_GAMMA) > 1.0e-12:
+    optim = actor.get("optim", {})
+    clip_grad = float(optim.get("clip_grad", CORRECT_RL_MAX_GRAD_NORM))
+    if abs(clip_grad - CORRECT_RL_MAX_GRAD_NORM) > 1.0e-12:
         raise ValueError(
-            f"Correct-RL requires algorithm.correct_rl_gamma={CORRECT_RL_GAMMA}, got {gamma}."
+            f"Correct-RL requires actor.optim.clip_grad={CORRECT_RL_MAX_GRAD_NORM}, "
+            f"got {clip_grad}."
         )
     policy_loss = actor.get("policy_loss", {})
     if str(policy_loss.get("loss_mode", "vanilla")) != "vanilla":
@@ -218,12 +198,12 @@ class CorrectRLTrainer(verl_sync.PPOTrainer):
         super().__init__(*args, **kwargs)
 
     def _compute_advantage(self, batch, metrics):
-        """Materialize probability-weighted advantages and the loss mask."""
+        """Materialize fixed advantages and the correctness loss mask."""
 
         data = verl_sync.tq.kv_batch_get(
             keys=batch.keys,
             partition_id=batch.partition_id,
-            select_fields=["response_mask", "rm_scores", "old_log_probs"],
+            select_fields=["response_mask", "rm_scores"],
         )
         response_mask_nested = data["response_mask"]
         if not response_mask_nested.is_nested:
@@ -232,10 +212,6 @@ class CorrectRLTrainer(verl_sync.PPOTrainer):
         rm_scores = data["rm_scores"]
         if rm_scores.is_nested:
             rm_scores = rm_scores.to_padded_tensor(0.0)
-        old_log_probs = data["old_log_probs"]
-        if old_log_probs.is_nested:
-            old_log_probs = old_log_probs.to_padded_tensor(0.0)
-
         genuine_mask = torch.tensor(
             [not bool(tag.get("is_padding", False)) for tag in batch.tags],
             dtype=torch.bool,
@@ -244,9 +220,7 @@ class CorrectRLTrainer(verl_sync.PPOTrainer):
         result = compute_correct_rl_batch(
             rm_scores=rm_scores,
             response_mask=response_mask,
-            old_log_probs=old_log_probs,
             genuine_trajectory_mask=genuine_mask,
-            gamma=float(self.config.algorithm.get("correct_rl_gamma", CORRECT_RL_GAMMA)),
         )
 
         output = TensorDict(
@@ -311,7 +285,7 @@ __all__ = [
     "CORRECT_RL_CLIP_RATIO",
     "CORRECT_RL_CLIP_RATIO_HIGH",
     "CORRECT_RL_CLIP_RATIO_LOW",
-    "CORRECT_RL_GAMMA",
+    "CORRECT_RL_MAX_GRAD_NORM",
     "CORRECT_RL_VARIANT",
     "CorrectRLBatchResult",
     "CorrectRLTrainer",

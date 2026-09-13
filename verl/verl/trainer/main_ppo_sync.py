@@ -1654,14 +1654,11 @@ class PPOTrainer:
             if distillation_enabled
             else 0.0
         )
+        # The sequence reducer receives the physical PPO mini-batch size as
+        # its denominator.  Correct-RL masks incorrect trajectories in the
+        # advantages, but deliberately keeps them in this denominator so that
+        # a low accuracy does not amplify the update.
         global_batch_size = ppo_mini_batch_size
-        if str(self.config.algorithm.get("name", "")) == "correct_rl":
-            # Correct-RL uses seq-mean-token-mean, but its sequence denominator
-            # is the global number of correct trajectories rather than the
-            # physical PPO mini-batch size.
-            global_batch_size = int(
-                batch.extra_info.get("correct_rl_correct_count", 0)
-            )
         extra_info = {
             "calculate_entropy": calculate_entropy,
             "distillation_use_topk": distillation_use_topk,
