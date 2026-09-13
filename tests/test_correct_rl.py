@@ -1,6 +1,5 @@
 """Correct-RL gating, normalization, clipping, and no-op regression tests."""
 
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -17,9 +16,15 @@ def test_correct_rl_marks_only_correct_tokens_and_reports_accuracy():
     rm_scores = torch.tensor(
         [[0.0, 1.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
     )
+    old_log_probs = torch.log(
+        torch.tensor(
+            [[0.25, 0.25, 0.25], [0.5, 0.5, 1.0], [0.125, 1.0, 1.0], [1.0, 1.0, 1.0]]
+        )
+    )
     result = compute_correct_rl_batch(
         rm_scores,
         response_mask,
+        old_log_probs,
         genuine_trajectory_mask=torch.tensor([True, True, True, False]),
     )
 
@@ -33,10 +38,16 @@ def test_correct_rl_marks_only_correct_tokens_and_reports_accuracy():
             [[1, 1, 1], [0, 0, 0], [1, 0, 0], [0, 0, 0]], dtype=torch.bool
         ),
     )
-    torch.testing.assert_close(
-        result.advantages,
-        result.token_mask.to(result.advantages.dtype),
+    expected_advantages = torch.tensor(
+        [
+            [(1.0 - 0.25) ** 0.5] * 3,
+            [0.0, 0.0, 0.0],
+            [(1.0 - 0.125) ** 0.5, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ]
     )
+    torch.testing.assert_close(result.advantages, expected_advantages)
+    assert result.advantages[0, 0] < result.advantages[2, 0]
     assert result.correct_count == 2
     assert result.genuine_count == 3
     assert result.loss_normalization == pytest.approx(0.5)
@@ -48,6 +59,7 @@ def test_correct_rl_all_incorrect_batch_has_zero_count_without_division_error():
     result = compute_correct_rl_batch(
         torch.zeros((2, 3)),
         torch.ones((2, 3), dtype=torch.bool),
+        torch.log(torch.full((2, 3), 0.5)),
     )
     assert result.correct_count == 0
     assert result.loss_normalization == 0.0
@@ -75,7 +87,7 @@ def _ppo_config():
             "use_kl_loss": False,
             "clip_ratio": 0.2,
             "clip_ratio_low": 0.2,
-            "clip_ratio_high": 0.2,
+            "clip_ratio_high": 0.27,
             "policy_loss": {"loss_mode": "vanilla"},
             "global_batch_info": {},
         }
@@ -127,19 +139,19 @@ def test_correct_rl_ppo_loss_uses_correct_count_and_zeroes_wrong_gradients():
     assert "actor/pg_loss" in metrics
 
 
-def test_correct_rl_ppo_clip_is_point_two():
+def test_correct_rl_ppo_clip_uses_upper_bound_point_two_seven():
     from verl.workers.utils import losses
 
     response_mask = torch.ones((1, 2), dtype=torch.bool)
     correct_mask = response_mask.clone()
     old_log_probs = torch.full((1, 2), -1.0)
-    # exp(log pi - log pi_old) = 2, which must clip to 1.2.
+    # exp(log pi - log pi_old) = 2, which must clip to 1.27.
     log_probs = (old_log_probs + torch.log(torch.tensor(2.0))).requires_grad_(True)
     data = _ppo_data(response_mask, correct_mask, old_log_probs, correct_mask.float())
 
     with patch.object(losses, "no_padding_2_padding", lambda value, _data: value):
         loss, _ = losses.ppo_loss(_ppo_config(), {"log_probs": log_probs}, data)
-    assert loss.detach().item() == pytest.approx(-1.2)
+    assert loss.detach().item() == pytest.approx(-1.27)
 
 
 def test_correct_rl_all_incorrect_is_safe_zero_gradient_noop():
@@ -200,6 +212,7 @@ def test_correct_rl_config_requires_no_reference_or_teacher():
                 "name": "correct_rl",
                 "adv_estimator": "grpo",
                 "use_kl_in_reward": False,
+                "correct_rl_gamma": 0.5,
             },
             "student_prompt": "qwen3_no_thinking_prompt",
             "teacher_prompt": "qwen3_no_thinking_prompt",
@@ -209,7 +222,7 @@ def test_correct_rl_config_requires_no_reference_or_teacher():
                     "loss_agg_mode": "seq-mean-token-mean",
                     "clip_ratio": 0.2,
                     "clip_ratio_low": 0.2,
-                    "clip_ratio_high": 0.2,
+                    "clip_ratio_high": 0.27,
                     "policy_loss": {"loss_mode": "vanilla"},
                     "use_kl_loss": False,
                 }

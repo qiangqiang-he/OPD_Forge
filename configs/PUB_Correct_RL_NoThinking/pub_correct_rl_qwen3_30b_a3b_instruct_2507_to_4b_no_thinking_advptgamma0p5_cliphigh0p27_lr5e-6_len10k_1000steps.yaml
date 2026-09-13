@@ -4,9 +4,9 @@ defaults:
   - /base
   - _self_
 
-run_name: pub_correct_rl_qwen3_30b_a3b_instruct_2507_to_4b_no_thinking_len10k_100steps
+run_name: pub_correct_rl_qwen3_30b_a3b_instruct_2507_to_4b_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps
 group_name: PUB_Correct_RL_NoThinking
-run_name_prefix: pub_correct_rl_qwen3_30b_a3b_instruct_2507_to_4b_no_thinking_len10k_100steps
+run_name_prefix: pub_correct_rl_qwen3_30b_a3b_instruct_2507_to_4b_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps
 
 student_prompt: qwen3_no_thinking_prompt
 teacher_prompt: qwen3_no_thinking_prompt
@@ -24,10 +24,10 @@ actor_rollout_ref:
     loss_agg_mode: seq-mean-token-mean
     clip_ratio: 0.2
     clip_ratio_low: 0.2
-    clip_ratio_high: 0.2
+    clip_ratio_high: 0.27
     policy_loss: {loss_mode: vanilla}
     use_kl_loss: false
-    optim: {lr: 1.0e-6}
+    optim: {lr: 5.0e-6}
   rollout:
     temperature: 1.0
     top_p: 1.0
@@ -42,6 +42,7 @@ algorithm:
   name: correct_rl
   adv_estimator: grpo
   use_kl_in_reward: false
+  correct_rl_gamma: 0.5
 
 rlvr_generation: {train_max_new_tokens: 10240, val_max_new_tokens: 16384}
 
@@ -52,8 +53,8 @@ critic: {enable: false}
 
 trainer:
   experiment_name: ${run_name}
-  total_training_steps: 100
+  total_training_steps: 1000
   default_local_dir: ./outputs/${run_name}
   val_before_train: true
   test_freq: 20
-  save_freq: 20
+  save_freq: 100
