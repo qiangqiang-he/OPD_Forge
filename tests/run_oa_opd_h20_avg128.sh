@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Launch the eight independent H20 workers for the OA--OPD Avg@128 study.
 # Run from WSL2:
+#   conda activate verl
 #   bash tests/run_oa_opd_h20_avg128.sh correct
 #   bash tests/run_oa_opd_h20_avg128.sh incorrect
 # Teacher models are configured in run_oa_opd_h20_avg128.py (TEACHER_MODELS).
 # Optional flags: --dataset PATH --output-root PATH --student-model PATH
 #   --teacher-key KEY (optional subset; repeat for several keys)
 #   --teacher-model PATH [--teacher-key KEY] (legacy single-Teacher override)
-#   --world-size N --python PATH --gpu-memory-utilization 0.95
+#   --world-size N --gpu-memory-utilization 0.95
+# Advanced override only: --python PATH (normally use the already-activated env)
 #   --overwrite --validate-only --phase all --arm all --run-id ID
 #   --gpu-ids 0,1,2,3,4,5,6,7 (physical IDs; useful with a scheduler)
 
@@ -121,12 +123,19 @@ if [[ -z "$MIN_FREE_GIB" ]]; then
 fi
 
 if [[ -z "$PYTHON_BIN" ]]; then
-  if command -v python >/dev/null 2>&1; then
+  # Prefer the interpreter belonging to an already activated virtualenv or
+  # Conda environment.  This keeps the normal launch command independent of
+  # machine-specific installation paths.
+  if [[ -n "${VIRTUAL_ENV:-}" && -x "$VIRTUAL_ENV/bin/python" ]]; then
+    PYTHON_BIN="$VIRTUAL_ENV/bin/python"
+  elif [[ -n "${CONDA_PREFIX:-}" && -x "$CONDA_PREFIX/bin/python" ]]; then
+    PYTHON_BIN="$CONDA_PREFIX/bin/python"
+  elif command -v python >/dev/null 2>&1; then
     PYTHON_BIN="$(command -v python)"
   elif command -v python3 >/dev/null 2>&1; then
     PYTHON_BIN="$(command -v python3)"
   else
-    echo "找不到 Python。请先激活 verl 环境，或用 --python /path/to/python 指定。" >&2
+    echo "找不到 Python。请先激活 verl 环境；特殊情况下可用 --python PATH 覆盖。" >&2
     exit 1
   fi
 fi
@@ -197,6 +206,7 @@ echo "OA-OPD Avg@128: outcome=$OUTCOME" | tee -a "$LOG_FILE"
 echo "dataset=$DATASET" | tee -a "$LOG_FILE"
 echo "output=$RUN_DIR" | tee -a "$LOG_FILE"
 echo "run_id=$RUN_ID" | tee -a "$LOG_FILE"
+echo "python=$PYTHON_BIN" | tee -a "$LOG_FILE"
 echo "gpu_ids=${GPU_ID_LIST[*]}" | tee -a "$LOG_FILE"
 echo "world_size=$WORLD_SIZE, each call=2 prompts x 128 = 256 rollouts" | tee -a "$LOG_FILE"
 echo "teacher proposal max tokens=1024, cumulative response max tokens=10240" | tee -a "$LOG_FILE"
