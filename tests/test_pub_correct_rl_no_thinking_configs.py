@@ -9,11 +9,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = PROJECT_ROOT / "configs" / "PUB_Correct_RL_NoThinking"
 CONFIG_NAMES = sorted(path.stem for path in CONFIG_DIR.glob("*.yaml"))
 EXPECTED_CONFIG_MODELS = {
-    "pub_correct_rl_qwen3_0p6b_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps": "Qwen3-0.6B",
-    "pub_correct_rl_qwen3_1p7b_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps": "Qwen3-1.7B",
-    "pub_correct_rl_qwen3_1p7b_repro_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps": "Qwen3-1.7B",
-    "pub_correct_rl_qwen3_4b_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps": "Qwen3-4B",
-    "pub_correct_rl_qwen3_8b_no_thinking_advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps": "Qwen3-8B",
+    "pub_correct_rl_qwen3_0p6b_no_thinking_advptgamma0p25_cliphigh0p27_lr1e-6_len10k_1000steps": "Qwen3-0.6B",
+    "pub_correct_rl_qwen3_1p7b_no_thinking_advptgamma0p25_cliphigh0p27_lr1e-6_len10k_1000steps": "Qwen3-1.7B",
+    "pub_correct_rl_qwen3_1p7b_repro_no_thinking_advptgamma0p25_cliphigh0p27_lr1e-6_len10k_1000steps": "Qwen3-1.7B",
+    "pub_correct_rl_qwen3_4b_no_thinking_advptgamma0p25_cliphigh0p27_lr1e-6_len10k_1000steps": "Qwen3-4B",
+    "pub_correct_rl_qwen3_8b_no_thinking_advptgamma0p25_cliphigh0p27_lr1e-6_len10k_1000steps": "Qwen3-8B",
 }
 
 
@@ -48,7 +48,7 @@ def test_correct_rl_no_thinking_publication_contract(config_name):
     config = _compose(config_name)
     OmegaConf.resolve(config)
 
-    assert "advptgamma0p5_cliphigh0p27_lr5e-6_len10k_1000steps" in config_name
+    assert "advptgamma0p25_cliphigh0p27_lr1e-6_len10k_1000steps" in config_name
     assert str(config.run_name) == config_name
     assert str(config.run_name_prefix) == config_name
     assert str(config.group_name) == "PUB_Correct_RL_NoThinking"
@@ -57,7 +57,7 @@ def test_correct_rl_no_thinking_publication_contract(config_name):
         EXPECTED_CONFIG_MODELS[config_name]
     )
     assert str(config.algorithm.adv_estimator) == "grpo"
-    assert float(config.algorithm.correct_rl_gamma) == pytest.approx(0.5)
+    assert float(config.algorithm.correct_rl_gamma) == pytest.approx(0.25)
     assert int(config.rlvr_generation.train_max_new_tokens) == 10240
     assert int(config.rlvr_generation.val_max_new_tokens) == 16384
     assert int(config.data.max_response_length) == 16384
@@ -73,7 +73,7 @@ def test_correct_rl_no_thinking_publication_contract(config_name):
     assert float(actor.clip_ratio_low) == pytest.approx(0.2)
     assert float(actor.clip_ratio_high) == pytest.approx(0.27)
     assert str(actor.policy_loss.loss_mode) == "vanilla"
-    assert float(actor.optim.lr) == pytest.approx(5.0e-6)
+    assert float(actor.optim.lr) == pytest.approx(1.0e-6)
     assert int(rollout.log_prob_max_token_len_per_gpu) == 12289
     assert int(rollout.max_model_len) == 18432
     assert int(rollout.max_num_batched_tokens) == 18432

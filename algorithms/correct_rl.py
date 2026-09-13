@@ -2,7 +2,7 @@
 
 Correct-RL keeps only verifier-correct rollouts.  A valid response token in a
 correct rollout receives ``(1 - p_t) ** gamma`` where ``p_t`` is the Student's
-original token probability and ``gamma`` is fixed to 0.5; incorrect rollouts
+original token probability and ``gamma`` defaults to 0.25; incorrect rollouts
 receive no policy gradient.  The standard ``seq-mean-token-mean`` reducer then
 averages tokens within each trajectory and, with ``global_batch_size`` set to
 the global number of correct trajectories, averages the remaining trajectories
@@ -29,7 +29,7 @@ CORRECT_RL_VARIANT = "correct_rl"
 CORRECT_RL_CLIP_RATIO = 0.2
 CORRECT_RL_CLIP_RATIO_LOW = 0.2
 CORRECT_RL_CLIP_RATIO_HIGH = 0.27
-CORRECT_RL_GAMMA = 0.5
+CORRECT_RL_GAMMA = 0.25
 
 
 @dataclass(frozen=True)

@@ -40,9 +40,9 @@ def test_correct_rl_marks_only_correct_tokens_and_reports_accuracy():
     )
     expected_advantages = torch.tensor(
         [
-            [(1.0 - 0.25) ** 0.5] * 3,
+            [(1.0 - 0.25) ** 0.25] * 3,
             [0.0, 0.0, 0.0],
-            [(1.0 - 0.125) ** 0.5, 0.0, 0.0],
+            [(1.0 - 0.125) ** 0.25, 0.0, 0.0],
             [0.0, 0.0, 0.0],
         ]
     )
@@ -212,7 +212,7 @@ def test_correct_rl_config_requires_no_reference_or_teacher():
                 "name": "correct_rl",
                 "adv_estimator": "grpo",
                 "use_kl_in_reward": False,
-                "correct_rl_gamma": 0.5,
+                "correct_rl_gamma": 0.25,
             },
             "student_prompt": "qwen3_no_thinking_prompt",
             "distillation": {"enabled": False},
