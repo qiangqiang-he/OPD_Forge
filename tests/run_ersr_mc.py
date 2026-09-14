@@ -662,6 +662,27 @@ def assignments(items: list[dict[str, Any]], gpu_ids: list[int]) -> list[list[di
     return [items[index:: len(gpu_ids)] for index in range(len(gpu_ids))]
 
 
+def next_shard_index(output_root: Path, gpu_id: int) -> int:
+    """Return the first unused batch index for one GPU's output shards.
+
+    Workers restart their local batch counter at zero on every invocation.
+    Resuming a partially completed phase must therefore append after the
+    existing shards instead of overwriting them.
+    """
+
+    shard_dir = output_root / "shards"
+    prefix = f"gpu_{gpu_id}_batch_"
+    highest = -1
+    for path in shard_dir.glob(f"{prefix}*.json"):
+        name = path.name
+        if not name.startswith(prefix) or not name.endswith(".json"):
+            continue
+        index_text = name[len(prefix) : -len(".json")]
+        if index_text.isdigit():
+            highest = max(highest, int(index_text))
+    return highest + 1
+
+
 def worker_model_kwargs(model_path: str, generation: dict[str, Any], max_model_len: int) -> dict[str, Any]:
     return {
         "model": model_path,
@@ -1034,6 +1055,10 @@ def run_workers(
     context = mp.get_context("spawn")
     result_queue = context.Queue()
     processes: list[mp.Process] = []
+    shard_offsets = {
+        rank: next_shard_index(output_root, gpu_id)
+        for rank, gpu_id in enumerate(gpu_ids)
+    }
     for rank, (gpu_id, assigned) in enumerate(zip(gpu_ids, assignments_by_rank, strict=True)):
         target = teacher_worker if role == "teacher" else student_worker
         kwargs = {
@@ -1079,7 +1104,8 @@ def run_workers(
                 )
             elif message_type == "batch":
                 rank = int(message["rank"])
-                shard_path = output_root / "shards" / f"gpu_{gpu_ids[rank]}_batch_{int(message['batch_index']):06d}.json"
+                batch_index = shard_offsets[rank] + int(message["batch_index"])
+                shard_path = output_root / "shards" / f"gpu_{gpu_ids[rank]}_batch_{batch_index:06d}.json"
                 atomic_json(shard_path, message)
                 all_records.extend(message.get("records", []))
                 completed_items += int(message.get("completed_items", 0))
