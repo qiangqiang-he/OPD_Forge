@@ -21,6 +21,16 @@ teachers:
     max_step_new_tokens: 2048
     temperature: 0.6
     top_p: 1.0
+  - name: qwen3_4b_instruct_2507_teacher
+    model_path: models/Qwen3-4B-Instruct-2507
+    max_step_new_tokens: 2048
+    temperature: 0.6
+    top_p: 1.0
+  - name: qwen3_30b_a3b_instruct_2507_teacher
+    model_path: models/Qwen3-30B-A3B-Instruct-2507
+    max_step_new_tokens: 2048
+    temperature: 0.6
+    top_p: 1.0
 
 selection:
   # Server setting: 2,000 non-answer steps from each 0/5 ... 5/5 bucket.

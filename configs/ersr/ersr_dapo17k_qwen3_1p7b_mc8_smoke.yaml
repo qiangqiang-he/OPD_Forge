@@ -2,6 +2,15 @@
 # runner by replacing only the fields needed for a short test.
 base_config: ersr_dapo17k_qwen3_1p7b.yaml
 
+teachers:
+  # Keep the local smoke runnable with the Teacher already available locally.
+  # The server configuration above still uses all three configured Teachers.
+  - name: qwen3_4b_teacher
+    model_path: models/Qwen3-4B
+    max_step_new_tokens: 2048
+    temperature: 0.6
+    top_p: 1.0
+
 selection:
   steps_per_bucket: 0
   total_steps: 100
