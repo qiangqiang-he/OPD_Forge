@@ -1,0 +1,35 @@
+# One-GPU local smoke override.  It inherits the server-shaped config in the
+# runner by replacing only the fields needed for a short test.
+base_config: ersr_dapo17k_qwen3_1p7b.yaml
+
+selection:
+  steps_per_bucket: 0
+  total_steps: 100
+  seed: 20260915
+
+generation:
+  mc_k: 8
+  # Keep the same cumulative response budget as the server run.  Several
+  # sampled prefixes are already longer than 2k tokens; a smaller smoke-only
+  # value would reject valid cases before Teacher generation starts.
+  max_total_response_tokens: 10240
+  max_num_batched_tokens: 32768
+  max_num_seqs: 256
+  gpu_memory_utilization: 0.72
+  min_free_gpu_gib: 5.0
+  seed: 20260915
+  # Keep the local smoke artifact compact; the server config above persists
+  # all continuation texts.
+  save_continuation_texts: false
+
+hardware:
+  expected_gpu_count: 1
+  require_expected_gpu_count: true
+  gpu_ids: auto
+
+output:
+  directory: outputs/ersr_dapo17k_qwen3_1p7b_mc8_smoke
+
+wandb:
+  mode: disabled
+  required: false

@@ -1,0 +1,76 @@
+# ERSR / MC@k evaluator configuration.  The server-shaped file uses all
+# nvidia-smi-visible GPUs; the local smoke override is kept beside it.
+
+input:
+  rollouts_with_steps: data/DAPO-17k-Qwen3-1.7B-NoThinking-Rollouts-Balanced-Avg5-with-steps.json
+  batches_dir: data/ersr_dapo17k_qwen3_1p7b_no_thinking_balanced_avg5/batches
+  tokenizer_path: models/Qwen3-1.7B
+  prompt_name: qwen3_no_thinking_prompt
+
+student:
+  name: qwen3_1p7b_student
+  model_path: models/Qwen3-1.7B
+
+# Each entry is a separately loaded Teacher replica.  On an eight-GPU host,
+# the same Teacher is replicated across the visible GPUs during its phase.
+teachers:
+  - name: qwen3_4b_teacher
+    model_path: models/Qwen3-4B
+    # A semantic step can be long (the saved DAPO traces contain steps above
+    # 700 tokens), so leave enough room for a complete Teacher replacement.
+    max_step_new_tokens: 2048
+    temperature: 0.6
+    top_p: 1.0
+
+selection:
+  # Server setting: 2,000 non-answer steps from each 0/5 ... 5/5 bucket.
+  steps_per_bucket: 2000
+  # Set this to a positive number only for a small local smoke run.
+  total_steps: 0
+  seed: 20260914
+  position_bins: 20
+
+generation:
+  # Every vLLM call on every GPU contains exactly this many completions.
+  per_gpu_rollouts: 256
+  mc_k: 128
+  temperature: 0.6
+  top_p: 1.0
+  max_total_response_tokens: 10240
+  min_continuation_tokens: 1
+  max_model_len: 0
+  max_num_batched_tokens: 32768
+  max_num_seqs: 256
+  gpu_memory_utilization: 0.78
+  min_free_gpu_gib: 5.0
+  gpu_check_interval_seconds: 5.0
+  gpu_report_interval_seconds: 60.0
+  seed: 20260914
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+  enforce_eager: true
+  # Keep cap-hit proposals with an explicit `truncated` flag so one unusually
+  # long Teacher step does not abort the complete run.  Downstream analysis
+  # can exclude these flagged replacements as a sensitivity subset.
+  reject_truncated_teacher_step: false
+  # Persist every Student continuation in the server output shards so the
+  # value estimates remain auditable and reusable.
+  save_continuation_texts: true
+
+hardware:
+  # The production run expects all eight nvidia-smi visible GPUs.  The local
+  # smoke config below overrides this to one.
+  expected_gpu_count: 8
+  require_expected_gpu_count: true
+  gpu_ids: auto
+
+output:
+  directory: outputs/ersr_dapo17k_qwen3_1p7b_mc128
+
+wandb:
+  mode: online
+  project: OPD_Forge
+  group: MC_Estimation
+  entity: null
+  run_name: ersr_dapo17k_qwen3_1p7b_mc128
+  required: true

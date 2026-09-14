@@ -92,6 +92,26 @@ bash scripts/start_eval.sh configs/eval/eval.yaml --validate-only
 预检只读取 YAML、数据集、tokenizer 与 checkpoint 元数据，不合并模型，也不启动
 vLLM 或 GPU worker。
 
+## ERSR MC Estimation
+
+ERSR 的离线 Monte-Carlo evaluator 位于 `tests/run_ersr_mc.py`，配置位于
+`configs/ersr/`。服务器配置会读取 `nvidia-smi` 返回的全部可见 GPU，并为每张卡
+启动一个独立 worker；它不使用 `world_size` 推断 GPU 数量。运行前请将
+`configs/ersr/ersr_dapo17k_qwen3_1p7b.yaml` 中的 Student、Teacher 和 tokenizer
+路径改为服务器上的本地模型目录，并确保 `data/` 中的 rollout 与 batch 元数据已
+同步。
+
+```bash
+cd /path/to/OPD_Forge
+python -m pip install -r requirements-ersr.txt
+export WANDB_API_KEY="你的密钥"
+python tests/run_ersr_mc.py \
+  --config configs/ersr/ersr_dapo17k_qwen3_1p7b.yaml
+```
+
+结果保存到配置中的 `outputs/ersr_dapo17k_qwen3_1p7b_mc128/`，运行进度同时写入
+各阶段的 `progress.json` 和 WandB 的 `OPD_Forge/MC_Estimation` group。
+
 ## 八卡 smoke
 
 下面的脚本依次运行 thinking GKD-OPD 和 no-thinking PG-OPD，各训练 2 steps，
