@@ -681,6 +681,10 @@ def worker_model_kwargs(model_path: str, generation: dict[str, Any], max_model_l
         "enable_prefix_caching": bool(generation.get("enable_prefix_caching", True)),
         "enable_chunked_prefill": bool(generation.get("enable_chunked_prefill", True)),
         "enforce_eager": bool(generation.get("enforce_eager", True)),
+        # Keep vLLM sleep mode explicitly disabled for every Student and
+        # Teacher replica.  This is intentionally code-level behavior rather
+        # than a per-run config option required by the server launcher.
+        "enable_sleep_mode": False,
         "seed": _int(generation.get("seed", 0), "generation.seed"),
     }
 
