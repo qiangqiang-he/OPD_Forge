@@ -52,6 +52,8 @@ SCHEMA_VERSION = 1
 BUCKETS = tuple(range(6))
 ROLL_OUTS_PER_GPU_CALL = 256
 MC_ARMS = ("redecide", "keep")
+TEACHER_MAX_RESAMPLE_ATTEMPTS = 3
+TEACHER_RETRY_SEED_STRIDE = 1_000_003
 
 
 def utc_now() -> str:
@@ -766,59 +768,89 @@ def teacher_worker(
 
         for batch_index, start in enumerate(range(0, len(tasks), slots)):
             batch = tasks[start : start + slots]
-            prompts: list[dict[str, Any]] = []
-            params: list[Any] = []
+            row_prompts: dict[str, dict[str, Any]] = {}
+            row_budgets: dict[str, int] = {}
             for row in batch:
                 pre = row["response_token_ids"][: int(row["step_token_start"])]
                 input_ids = list(row["prompt_token_ids"]) + list(pre)
                 budget = min(max_step, max_total - len(pre))
                 if budget <= 0:
                     raise RuntimeError(f"No Teacher budget remains for {row['case_id']}.")
-                prompts.append({"prompt_token_ids": input_ids})
-                params.append(
+                case_id = str(row["case_id"])
+                row_prompts[case_id] = {"prompt_token_ids": input_ids}
+                row_budgets[case_id] = budget
+            started = time.monotonic()
+            unresolved = list(batch)
+            resolved: dict[str, dict[str, Any]] = {}
+            diagnostics: dict[str, str] = {}
+            for attempt in range(TEACHER_MAX_RESAMPLE_ATTEMPTS):
+                if not unresolved:
+                    break
+                prompts = [row_prompts[str(row["case_id"])] for row in unresolved]
+                params = [
                     SamplingParams(
                         n=1,
                         temperature=_float(teacher.get("temperature", 0.6), "teacher.temperature"),
                         top_p=_float(teacher.get("top_p", 1.0), "teacher.top_p"),
                         top_k=-1,
-                        max_tokens=budget,
-                        seed=_int(generation.get("seed", 0), "generation.seed") + int(row["case_index"]),
+                        min_tokens=1,
+                        max_tokens=row_budgets[str(row["case_id"])],
+                        seed=(
+                            _int(generation.get("seed", 0), "generation.seed")
+                            + int(row["case_index"])
+                            + attempt * TEACHER_RETRY_SEED_STRIDE
+                        ),
                     )
-                )
-            prompts, params = _padding_specs(prompts, params, slots)
-            started = time.monotonic()
-            with GPUHeartbeat(
-                gpu_id=gpu_id,
-                required_free_mib=required_free,
-                check_interval=check_interval,
-                report_interval=report_interval,
-                stage=f"teacher/{teacher['name']}/batch_{batch_index}",
-            ):
-                outputs = llm.generate(prompts, sampling_params=params, use_tqdm=False)
-            if len(outputs) != slots:
-                raise RuntimeError(f"Teacher returned {len(outputs)} requests, expected {slots}.")
-            records: list[dict[str, Any]] = []
-            for row, output in zip(batch, outputs[: len(batch)], strict=True):
-                if list(output.prompt_token_ids) != list(prompts[batch.index(row)]["prompt_token_ids"]):
-                    raise RuntimeError(f"Teacher changed input IDs for {row['case_id']}.")
-                if len(output.outputs) != 1:
-                    raise RuntimeError(f"Teacher did not return one sample for {row['case_id']}.")
-                completion = output.outputs[0]
-                proposal_ids = [int(value) for value in completion.token_ids]
-                if not proposal_ids:
-                    raise RuntimeError(f"Teacher returned an empty proposal for {row['case_id']}.")
-                visible, mapped = map_response_steps_to_original_tokens(tokenizer, proposal_ids)
-                if not mapped:
-                    raise RuntimeError(f"Teacher proposal has no semantic step for {row['case_id']}.")
-                first = mapped[0]
-                finish_reason = normalized_reason(completion.finish_reason)
-                maybe_truncated = finish_reason == "length" and int(first.token_end) == len(proposal_ids)
-                if reject_truncated and maybe_truncated:
-                    raise RuntimeError(f"Teacher first step was truncated for {row['case_id']}.")
-                records.append(
-                    {
+                    for row in unresolved
+                ]
+                prompts, params = _padding_specs(prompts, params, slots)
+                with GPUHeartbeat(
+                    gpu_id=gpu_id,
+                    required_free_mib=required_free,
+                    check_interval=check_interval,
+                    report_interval=report_interval,
+                    stage=f"teacher/{teacher['name']}/batch_{batch_index}/attempt_{attempt}",
+                ):
+                    outputs = llm.generate(prompts, sampling_params=params, use_tqdm=False)
+                if len(outputs) != slots:
+                    raise RuntimeError(f"Teacher returned {len(outputs)} requests, expected {slots}.")
+                next_unresolved: list[dict[str, Any]] = []
+                for row, output in zip(unresolved, outputs[: len(unresolved)], strict=True):
+                    case_id = str(row["case_id"])
+                    if list(output.prompt_token_ids) != list(row_prompts[case_id]["prompt_token_ids"]):
+                        raise RuntimeError(f"Teacher changed input IDs for {case_id}.")
+                    if len(output.outputs) != 1:
+                        raise RuntimeError(f"Teacher returned {len(output.outputs)} samples for {case_id}.")
+                    completion = output.outputs[0]
+                    proposal_ids = [int(value) for value in completion.token_ids]
+                    finish_reason = normalized_reason(completion.finish_reason)
+                    decoded_preview = ""
+                    try:
+                        visible, mapped = map_response_steps_to_original_tokens(tokenizer, proposal_ids)
+                        decoded_preview = visible[:120]
+                        if not proposal_ids:
+                            raise ValueError("empty proposal token list")
+                        if not mapped:
+                            raise ValueError("decoded proposal has no semantic step")
+                        first = mapped[0]
+                        maybe_truncated = (
+                            finish_reason == "length"
+                            and int(first.token_end) == len(proposal_ids)
+                        )
+                        if reject_truncated and maybe_truncated:
+                            raise ValueError("first semantic step was truncated")
+                    except Exception as exc:
+                        diagnostics[case_id] = (
+                            f"attempt={attempt + 1}/{TEACHER_MAX_RESAMPLE_ATTEMPTS}, "
+                            f"finish_reason={finish_reason!r}, proposal_tokens={len(proposal_ids)}, "
+                            f"decoded_preview={decoded_preview!r}, "
+                            f"error={exc!r}"
+                        )
+                        next_unresolved.append(row)
+                        continue
+                    resolved[case_id] = {
                         "ok": True,
-                        "case_id": str(row["case_id"]),
+                        "case_id": case_id,
                         "case_index": int(row["case_index"]),
                         "teacher_name": str(teacher["name"]),
                         "replacement_text": str(first.text),
@@ -828,7 +860,17 @@ def teacher_worker(
                         "finish_reason": finish_reason,
                         "truncated": int(maybe_truncated),
                     }
+                unresolved = next_unresolved
+            if unresolved:
+                failed_cases = ", ".join(
+                    f"{row['case_id']} ({diagnostics.get(str(row['case_id']), 'no diagnostic')})"
+                    for row in unresolved
                 )
+                raise RuntimeError(
+                    "Teacher could not produce a semantic replacement after "
+                    f"{TEACHER_MAX_RESAMPLE_ATTEMPTS} attempts: {failed_cases}"
+                )
+            records = [resolved[str(row["case_id"])] for row in batch]
             memory = assert_gpu_headroom(gpu_id, required_free, stage="teacher-after-batch")
             result_queue.put(
                 {
