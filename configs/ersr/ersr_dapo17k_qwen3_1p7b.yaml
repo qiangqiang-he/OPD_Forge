@@ -79,7 +79,7 @@ output:
 
 wandb:
   mode: online
-  project: OPD_Forge
+  project: OPD_Explore
   group: MC_Estimation
   entity: null
   run_name: ersr_dapo17k_qwen3_1p7b_mc128
