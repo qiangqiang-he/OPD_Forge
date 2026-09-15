@@ -199,6 +199,7 @@ class DistillationLossConfig(BaseConfig):
             "uni_opd",
             "fire_opd",
             "oa_opd",
+            "r2opl_base",
         }:
             raise ValueError(
                 f"Directly backpropagating {self.loss_mode} is incorrect since its sampled-token loss "

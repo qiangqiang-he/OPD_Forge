@@ -263,6 +263,16 @@ def distillation_loss(
     )
     response_mask = data["response_mask"]
     loss_agg_mode = config.loss_agg_mode
+    # The direct OPD path does not call ``ppo_loss`` (task rewards are
+    # disabled), so the actor-level global reducer metadata is not populated
+    # by that helper.  Copy the same metadata from the engine input here so
+    # sampled-token policy losses, including R²OPL-base, preserve the global
+    # batch/sequence-mean normalization under FSDP.
+    for key in ("dp_size", "batch_num_tokens", "global_batch_size"):
+        value = tu.get_non_tensor_data(data, key, default=None)
+        if value is not None:
+            config.global_batch_info[key] = value
+    config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
     eopd_forward_kl_losses = None
     if loss_config.loss_mode == "eopd":
         eopd_forward_kl_losses = no_padding_2_padding(
@@ -667,6 +677,171 @@ def compute_fire_opd_trajectory_loss(
     # distillation_loss() negates and detaches this tensor before invoking the
     # configured OPD policy-loss implementation, recovering A_FiRe.
     return -advantage, {}
+
+
+@register_distillation_loss(
+    DistillationLossSettings(names=["r2opl_base"], use_estimator=True)
+)  # type: ignore[arg-type]
+def compute_r2opl_base_sampled_token_loss(
+    config: ActorConfig,
+    distillation_config: DistillationConfig,
+    model_output: dict,
+    data: TensorDict,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Return the detached hybrid R²OPL-base policy-gradient signal.
+
+    The controller materializes ``r2opl_base_correct_mask`` and the
+    prompt-level ``r2opl_base_difficulty`` for the complete rollout batch.
+    The Student log-probability is intentionally taken from this actor
+    forward, rather than from the controller's pre-update pass, so the OPD
+    branch remains aligned with the current policy during a PPO epoch.
+
+    The shared distillation path negates the returned tensor before invoking
+    the ``reinforce`` policy loss; returning ``-advantage`` therefore recovers
+    the objective ``-A * log pi``.
+    """
+
+    del config
+    student_log_probs = no_padding_2_padding(model_output["log_probs"], data)
+    teacher_log_probs = no_padding_2_padding(
+        data["teacher_logprobs"], data
+    ).squeeze(-1)
+    response_mask = data["response_mask"]
+    if response_mask.is_nested:
+        response_mask = response_mask.bool().to_padded_tensor(False)
+    else:
+        response_mask = response_mask.bool()
+
+    correct_mask = data.get("r2opl_base_correct_mask", None)
+    error_mask = data.get("r2opl_base_error_mask", None)
+    difficulty = data.get("r2opl_base_difficulty", None)
+    if correct_mask is None or error_mask is None or difficulty is None:
+        raise RuntimeError(
+            "R²OPL-base actor input is missing controller-computed masks or difficulty."
+        )
+    if correct_mask.is_nested:
+        correct_mask = correct_mask.bool().to_padded_tensor(False)
+    else:
+        correct_mask = correct_mask.bool()
+    if error_mask.is_nested:
+        error_mask = error_mask.bool().to_padded_tensor(False)
+    else:
+        error_mask = error_mask.bool()
+    if difficulty.is_nested:
+        difficulty = difficulty.to_padded_tensor(0.0)
+    else:
+        difficulty = difficulty.float()
+
+    expected_shape = response_mask.shape
+    if not (
+        student_log_probs.shape
+        == teacher_log_probs.shape
+        == correct_mask.shape
+        == error_mask.shape
+        == difficulty.shape
+        == expected_shape
+    ):
+        raise ValueError(
+            "R²OPL-base actor token tensors must have identical shapes; got "
+            f"student={tuple(student_log_probs.shape)}, "
+            f"teacher={tuple(teacher_log_probs.shape)}, "
+            f"response_mask={tuple(response_mask.shape)}, "
+            f"correct_mask={tuple(correct_mask.shape)}, "
+            f"error_mask={tuple(error_mask.shape)}, "
+            f"difficulty={tuple(difficulty.shape)}."
+        )
+    if bool((correct_mask & error_mask).any()):
+        raise ValueError("R²OPL-base correct and error token masks overlap.")
+    if bool(((correct_mask | error_mask) & ~response_mask).any()):
+        raise ValueError("R²OPL-base branch masks must be subsets of response_mask.")
+    if not bool(torch.isfinite(difficulty[response_mask]).all()):
+        raise ValueError("R²OPL-base prompt difficulties must be finite.")
+
+    opd_advantage = teacher_log_probs.float() - student_log_probs.float()
+    loss_config = distillation_config.distillation_loss
+    lambda_field = data.get("r2opl_base_lambda", None)
+    if lambda_field is None:
+        lambda_value = float(getattr(loss_config, "r2opl_lambda", 1.0 / 20.0))
+        if not torch.isfinite(torch.tensor(lambda_value)) or lambda_value < 0.0:
+            raise ValueError(
+                f"R²OPL-base lambda must be finite and non-negative; got {lambda_value}."
+            )
+        lambda_tensor = torch.tensor(
+            lambda_value, dtype=opd_advantage.dtype, device=opd_advantage.device
+        )
+    else:
+        # TransferQueue normally preserves this as a tensor, but unwrap the
+        # metadata form too so scalar test fixtures and alternate dispatch
+        # paths cannot change the mathematical signal silently.
+        lambda_field = tu.unwrap_non_tensor_data(lambda_field)
+        if not torch.is_tensor(lambda_field):
+            lambda_field = torch.tensor(
+                float(lambda_field),
+                dtype=opd_advantage.dtype,
+                device=opd_advantage.device,
+            )
+        if lambda_field.is_nested:
+            lambda_field = lambda_field.to_padded_tensor(0.0)
+        lambda_tensor = lambda_field.to(
+            dtype=opd_advantage.dtype, device=opd_advantage.device
+        ).reshape(-1)
+        if lambda_tensor.numel() == 1:
+            lambda_tensor = lambda_tensor.reshape(1, 1)
+        elif lambda_tensor.numel() == opd_advantage.shape[0]:
+            lambda_tensor = lambda_tensor.reshape(-1, 1)
+        else:
+            raise ValueError(
+                "R²OPL-base lambda must be scalar or have one value per trajectory; "
+                f"got {lambda_tensor.numel()} values for batch size {opd_advantage.shape[0]}."
+            )
+        if not bool(torch.isfinite(lambda_tensor).all()) or bool(lambda_tensor.lt(0.0).any()):
+            raise ValueError("R²OPL-base lambda values must be finite and non-negative.")
+
+    correct_advantage = difficulty.float()
+    error_advantage = difficulty.float() * lambda_tensor * opd_advantage
+    branch = str(
+        tu.get_non_tensor_data(data, "r2opl_base_gradient_branch", default="total")
+    )
+    if branch == "correct":
+        advantage = correct_advantage * correct_mask.to(correct_advantage.dtype)
+        metric_mask = correct_mask
+    elif branch == "error":
+        advantage = error_advantage * error_mask.to(error_advantage.dtype)
+        metric_mask = error_mask
+    elif branch == "total":
+        advantage = torch.where(correct_mask, correct_advantage, error_advantage)
+        advantage = advantage * response_mask.to(advantage.dtype)
+        metric_mask = response_mask
+    else:
+        raise ValueError(
+            "R²OPL-base gradient branch must be one of 'correct', 'error', or "
+            f"'total'; got {branch!r}."
+        )
+    advantage = advantage * response_mask.to(advantage.dtype)
+    distillation_losses = -advantage
+
+    error_valid = error_mask & response_mask
+    zero = opd_advantage.float().sum() * 0.0
+
+    def masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        selected = values[mask].float()
+        return selected.mean() if selected.numel() else zero
+
+    metrics = {
+        "distillation/reverse_kl_estimate": Metric(
+            AggregationType.MEAN, masked_mean(opd_advantage, error_valid)
+        ),
+        "distillation/opd_advantage_mean": Metric(
+            AggregationType.MEAN, masked_mean(opd_advantage, error_valid)
+        ),
+        "distillation/opd_advantage_abs_mean": Metric(
+            AggregationType.MEAN, masked_mean(opd_advantage.abs(), error_valid)
+        ),
+        "distillation/applied_advantage_mean": Metric(
+            AggregationType.MEAN, masked_mean(advantage, metric_mask)
+        ),
+    }
+    return distillation_losses, metrics
 
 
 def compute_opd_outcome_statistics(

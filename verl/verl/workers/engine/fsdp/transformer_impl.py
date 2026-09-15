@@ -622,6 +622,126 @@ class FSDPEngine(BaseEngine):
     def get_context_parallel_group(self):
         raise NotImplementedError
 
+    def _r2opl_base_gradient_norm(self, *, grad_scale: float = 1.0) -> float:
+        """Return the global pre-clipping gradient norm for R²OPL diagnostics.
+
+        FSDP's native clipping helpers perform the required cross-rank
+        reduction.  Passing ``inf`` leaves the gradients unchanged while
+        exposing the same global norm that the real optimizer step uses.
+        """
+
+        max_norm = float("inf")
+        if isinstance(self.module, FSDP):
+            value = self.module.clip_grad_norm_(max_norm)
+        elif isinstance(self.module, FSDPModule):
+            value = fsdp2_clip_grad_norm_(
+                self.module.parameters(), max_norm=max_norm
+            )
+        else:
+            value = torch.nn.utils.clip_grad_norm_(
+                self.module.parameters(), max_norm=max_norm
+            )
+        if isinstance(value, DTensor):
+            value = value.full_tensor()
+        norm = float(value.detach().item() if isinstance(value, torch.Tensor) else value)
+        return norm / grad_scale
+
+    def _r2opl_base_snapshot_gradients(self) -> list[torch.Tensor | None]:
+        """Clone the current local FSDP gradient shards for later summation."""
+
+        return [
+            parameter.grad.detach().clone() if parameter.grad is not None else None
+            for parameter in self.module.parameters()
+        ]
+
+    def _r2opl_base_add_gradients(
+        self, saved_gradients: list[torch.Tensor | None]
+    ) -> None:
+        """Add a saved branch gradient to the currently accumulated gradient."""
+
+        parameters = list(self.module.parameters())
+        if len(parameters) != len(saved_gradients):
+            raise RuntimeError(
+                "R²OPL-base gradient snapshot no longer matches model parameters."
+            )
+        for parameter, saved_gradient in zip(parameters, saved_gradients, strict=True):
+            if saved_gradient is None:
+                continue
+            if parameter.grad is None:
+                parameter.grad = saved_gradient
+            else:
+                parameter.grad.add_(saved_gradient)
+
+    @staticmethod
+    def _r2opl_base_combine_loss_metrics(correct_output: dict, error_output: dict) -> None:
+        """Make the reported scalar loss equal the sum of both branch losses."""
+
+        error_output["loss"] += correct_output["loss"]
+        correct_metric = correct_output.get("metrics", {}).get("distillation/loss")
+        error_metric = error_output.get("metrics", {}).get("distillation/loss")
+        if correct_metric is None or error_metric is None:
+            return
+        if not (
+            hasattr(correct_metric, "init_list")
+            and hasattr(error_metric, "init_list")
+            and hasattr(correct_metric, "extend")
+            and hasattr(error_metric, "extend")
+        ):
+            return
+        combined = error_metric.init_list()
+        combined.extend(correct_metric)
+        combined.extend(error_metric)
+        error_output["metrics"]["distillation/loss"] = combined
+
+    def _r2opl_base_measure_branch(
+        self,
+        data: TensorDict,
+        loss_function: Callable,
+        branch: str,
+        *,
+        preserve_gradients: bool,
+    ) -> tuple[float, list[dict], object, list[torch.Tensor | None] | None]:
+        """Run one R²OPL branch backward pass and optionally save its gradients.
+
+        Correct and incorrect trajectories are disjoint, so their gradients
+        add linearly.  Saving the correct branch after its backward lets the
+        error branch provide its independent norm and then become the actual
+        optimizer gradient after addition.  This keeps the requested
+        diagnostics to two backwards rather than replaying a third total loss.
+        """
+
+        tu.assign_non_tensor(data, r2opl_base_gradient_branch=branch)
+        micro_batches, indices = prepare_micro_batches(
+            data=data,
+            dp_group=self.get_data_parallel_group(),
+            same_micro_num_in_dp=True,
+        )
+        self.optimizer_zero_grad()
+        scaler = getattr(self, "scaler", None)
+        grad_scale = float(scaler.get_scale()) if scaler is not None else 1.0
+        output_lst = []
+
+        for micro_batch in micro_batches:
+            loss, meta_info = self.forward_step(
+                micro_batch, loss_function=loss_function, forward_only=False
+            )
+            if scaler is None:
+                loss.backward()
+            else:
+                # Keep both branch gradients scaled.  The normal optimizer
+                # step unscales their combined result exactly once.
+                scaler.scale(loss).backward()
+            output_lst.append(meta_info)
+            del loss, micro_batch
+
+        norm = self._r2opl_base_gradient_norm(grad_scale=grad_scale)
+        saved_gradients = (
+            self._r2opl_base_snapshot_gradients() if preserve_gradients else None
+        )
+        if preserve_gradients:
+            self.optimizer_zero_grad()
+        return norm, output_lst, indices, saved_gradients
+
     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> list[TensorDict]:
         # note that the global_batch_size should include data on all the dp
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
@@ -634,29 +754,87 @@ class FSDPEngine(BaseEngine):
         tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
         tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
 
-        micro_batches, indices = prepare_micro_batches(
-            data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
+        # R²OPL needs branch-specific gradient diagnostics.  Two branch
+        # backwards are sufficient: save the correct gradient, measure the
+        # error gradient, then add the saved shard gradients before the normal
+        # optimizer step.  The resulting gradient is exactly g_correct +
+        # g_error and its regular pre-clipping norm is reported as total.
+        r2opl_diagnostics = (
+            not forward_only
+            and "r2opl_base_correct_mask" in data.keys()
+            and "r2opl_base_error_mask" in data.keys()
+        )
+        r2opl_branch_norms: dict[str, float] = {}
+        if r2opl_diagnostics:
+            (
+                r2opl_branch_norms["correct"],
+                correct_output_lst,
+                _,
+                correct_gradients,
+            ) = self._r2opl_base_measure_branch(
+                data, loss_function, "correct", preserve_gradients=True
+            )
+            (
+                r2opl_branch_norms["error"],
+                output_lst,
+                indices,
+                _,
+            ) = self._r2opl_base_measure_branch(
+                data, loss_function, "error", preserve_gradients=False
+            )
+            if correct_gradients is None:
+                raise RuntimeError("R²OPL-base did not retain correct branch gradients.")
+            self._r2opl_base_add_gradients(correct_gradients)
+            if len(correct_output_lst) != len(output_lst):
+                raise RuntimeError(
+                    "R²OPL-base branch micro-batch layouts diverged unexpectedly."
+                )
+            for correct_output, error_output in zip(
+                correct_output_lst, output_lst, strict=True
+            ):
+                self._r2opl_base_combine_loss_metrics(correct_output, error_output)
+        else:
+            output_lst = []
+            indices = None
+        tu.assign_non_tensor(
+            data,
+            r2opl_base_gradient_branch="total",
         )
 
-        output_lst = []
+        if not r2opl_diagnostics:
+            micro_batches, indices = prepare_micro_batches(
+                data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
+            )
 
-        ctx = torch.no_grad() if forward_only else nullcontext()
+            ctx = torch.no_grad() if forward_only else nullcontext()
 
-        # getattr fallback: some subclasses (e.g. VeOmniEngine) bypass FSDPEngine.__init__
-        # and _build_fsdp_module, so self.scaler may not be set.
-        scaler = getattr(self, "scaler", None)
+            # getattr fallback: some subclasses (e.g. VeOmniEngine) bypass FSDPEngine.__init__
+            # and _build_fsdp_module, so self.scaler may not be set.
+            scaler = getattr(self, "scaler", None)
 
-        for micro_batch in micro_batches:
-            with ctx:
-                loss, meta_info = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
+            for micro_batch in micro_batches:
+                with ctx:
+                    loss, meta_info = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
 
-                if not forward_only:
-                    if scaler is not None:
-                        scaler.scale(loss).backward()
-                    else:
-                        loss.backward()
+                    if not forward_only:
+                        if scaler is not None:
+                            scaler.scale(loss).backward()
+                        else:
+                            loss.backward()
 
-            output_lst.append(meta_info)
+                output_lst.append(meta_info)
+
+        # Attach branch norms to one metrics record so postprocessing carries
+        # them through the normal actor/controller aggregation path.  The
+        # regular ``grad_norm`` inserted by ``BaseEngine.train_batch`` remains
+        # the combined pre-clipping norm and is aliased by R²OPL as well.
+        if r2opl_diagnostics and output_lst:
+            output_lst[0].setdefault("metrics", {}).update(
+                {
+                    "r2opl_base/correct_grad_norm": r2opl_branch_norms["correct"],
+                    "r2opl_base/error_grad_norm": r2opl_branch_norms["error"],
+                }
+            )
 
         # postprocess and return
         return postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)

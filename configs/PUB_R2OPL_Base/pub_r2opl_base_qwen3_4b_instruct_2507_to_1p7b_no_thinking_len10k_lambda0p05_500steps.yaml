@@ -1,0 +1,81 @@
+# R²OPL-base: difficulty-aware self-reinforcement on correct rollouts and
+# teacher-guided OPD on incorrect rollouts (lambda=0.05).
+
+defaults:
+  - /base
+  - _self_
+
+run_name: pub_r2opl_base_qwen3_4b_instruct_2507_to_1p7b_no_thinking_len10k_lambda0p05_500steps
+group_name: PUB_R2OPL_Base
+run_name_prefix: pub_r2opl_base_qwen3_4b_instruct_2507_to_1p7b_no_thinking_len10k_lambda0p05_500steps
+
+student_prompt: qwen3_no_thinking_prompt
+teacher_prompt: qwen3_no_thinking_prompt
+
+data:
+  # 32 questions x 8 responses = 256 trajectories per training step.
+  train_batch_size: 32
+  train_files: [./data/DAPO-17k.json]
+  val_files: [./data/AMC-2023.json, ./data/AIME-2024.json, ./data/AIME-2025.json]
+  max_prompt_length: 2048
+  max_response_length: 16384
+
+actor_rollout_ref:
+  model: {path: ./models/Qwen3-1.7B}
+  actor:
+    ppo_max_token_len_per_gpu: 12289
+    # Average each trajectory by its own valid response-token count first.
+    loss_agg_mode: seq-mean-token-mean
+    optim:
+      lr: 1.0e-6
+      clip_grad: 1.0
+  rollout:
+    enable_sleep_mode: false
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    n: 8
+    max_model_len: 18432
+    max_num_batched_tokens: 18432
+    log_prob_max_token_len_per_gpu: 12289
+    val_kwargs: {temperature: 0.6, top_p: 0.95, top_k: -1, n: 16}
+  ref: {log_prob_max_token_len_per_gpu: 12289}
+
+algorithm:
+  name: r2opl_base
+  r2opl_base:
+    lambda: 0.05
+
+rlvr_generation:
+  train_max_new_tokens: 10240
+  val_max_new_tokens: 16384
+
+distillation:
+  teacher_chunk_size: 128
+  teacher_models:
+    teacher_model:
+      model_path: ./models/Qwen3-4B-Instruct-2507
+      inference:
+        enable_sleep_mode: false
+        response_length: 10240
+        tensor_model_parallel_size: 1
+        max_model_len: 12289
+        engine_kwargs:
+          vllm: {max_logprobs: 16}
+  distillation_loss:
+    loss_mode: r2opl_base
+    selection_ratio: 1.0
+    selection_method: random
+    loss_max_clamp: 20.0
+    log_prob_min_clamp: null
+    policy_loss_mode: reinforce
+    use_policy_gradient: true
+    use_task_rewards: false
+
+trainer:
+  experiment_name: ${run_name}
+  total_training_steps: 500
+  default_local_dir: ./outputs/${run_name}
+  val_before_train: true
+  test_freq: 20
+  save_freq: 100

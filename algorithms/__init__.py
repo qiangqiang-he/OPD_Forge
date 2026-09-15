@@ -64,6 +64,9 @@ ALGORITHM_REGISTRY: dict[str, AlgorithmRegistration] = {
     "oa_opd": AlgorithmRegistration(
         "algorithms.oa_opd", "OAOPDTrainer", "validate_oa_opd_config"
     ),
+    "r2opl_base": AlgorithmRegistration(
+        "algorithms.r2opl_base", "R2OPLBaseTrainer", "validate_r2opl_base_config"
+    ),
     "fast_oa_opd": AlgorithmRegistration(
         "algorithms.fast_oa_opd",
         "FastOAOPDTrainer",

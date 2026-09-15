@@ -32,6 +32,7 @@ SUPPORTED_LOSS_MODES = {
     "uni_opd",
     "fire_opd",
     "oa_opd",
+    "r2opl_base",
 }
 
 TOKEN_SELECTION_METHODS = {"random", "topgap", "bottomgap"}
