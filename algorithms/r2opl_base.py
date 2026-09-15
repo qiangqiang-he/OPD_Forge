@@ -414,6 +414,12 @@ class R2OPLBaseTrainer(BaseOPDTrainer):
         batch = super()._compute_old_log_prob(batch, metrics)
         fields = [
             "uid",
+            # ``no_padding_2_padding`` needs the original prompt/response
+            # boundaries to align Teacher token log-probabilities with the
+            # sampled response.  These fields must come from the same
+            # TransferQueue snapshot as the log-probability tensors.
+            "prompts",
+            "responses",
             "response_mask",
             "rm_scores",
             "teacher_logprobs",

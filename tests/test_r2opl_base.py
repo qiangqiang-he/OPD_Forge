@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
+from tensordict import TensorDict
 from omegaconf import OmegaConf
 
 from algorithms import resolve_algorithm
@@ -366,6 +367,99 @@ def test_production_config_preserves_the_32_times_8_8_gpu_contract():
     assert config.actor_rollout_ref.actor.loss_agg_mode == "seq-mean-token-mean"
     assert config.distillation.distillation_loss.loss_mode == "r2opl_base"
     assert config.distillation.distillation_loss.loss_max_clamp == pytest.approx(20.0)
+
+
+def test_controller_old_log_prob_handles_two_questions_with_eight_rollouts(monkeypatch):
+    """Exercise the real TransferQueue alignment path on a small 2x8 batch.
+
+    The production run uses 32 questions, but this intentionally smaller
+    controller smoke test catches missing ``prompts``/``responses`` fields
+    before a full distributed launch.  Teacher log-probs are stored in the
+    same nested full-sequence layout returned by TransferQueue, so
+    ``no_padding_2_padding`` performs its actual token-boundary conversion.
+    """
+
+    from verl.trainer import main_ppo_sync as sync
+
+    question_count, rollouts_per_question = 2, 8
+    batch_size, response_len, prompt_len = question_count * rollouts_per_question, 3, 2
+    sequence_len = prompt_len + response_len
+
+    class FakeBatch:
+        keys = [f"sample-{index}" for index in range(batch_size)]
+        partition_id = 0
+        tags = [{} for _ in range(batch_size)]
+
+        def __len__(self):
+            return batch_size
+
+    prompts = torch.nested.as_nested_tensor(
+        [torch.arange(prompt_len) + index for index in range(batch_size)],
+        layout=torch.jagged,
+    )
+    responses = torch.nested.as_nested_tensor(
+        [torch.arange(response_len) + 10 + index for index in range(batch_size)],
+        layout=torch.jagged,
+    )
+    response_mask = torch.nested.as_nested_tensor(
+        [torch.ones(response_len, dtype=torch.bool) for _ in range(batch_size)],
+        layout=torch.jagged,
+    )
+    teacher_full_sequence = torch.nested.as_nested_tensor(
+        [torch.arange(sequence_len, dtype=torch.float32) + index for index in range(batch_size)],
+        layout=torch.jagged,
+    )
+    fields = TensorDict(
+        {
+            "uid": [f"question-{index // rollouts_per_question}" for index in range(batch_size)],
+            "prompts": prompts,
+            "responses": responses,
+            "response_mask": response_mask,
+            "rm_scores": torch.tensor(
+                [1.0] * rollouts_per_question + [0.0] * rollouts_per_question
+            ),
+            "teacher_logprobs": teacher_full_sequence,
+            "old_log_probs": torch.zeros((batch_size, response_len)),
+        },
+        batch_size=[batch_size],
+    )
+    requested_fields = []
+    stored_fields = {}
+
+    def fake_get(*, select_fields, **_kwargs):
+        requested_fields.extend(select_fields)
+        return fields
+
+    def fake_put(*, fields, **_kwargs):
+        stored_fields.update({key: value for key, value in fields.items()})
+        return FakeBatch()
+
+    monkeypatch.setattr(sync.tq, "kv_batch_get", fake_get)
+    monkeypatch.setattr(sync.tq, "kv_batch_put", fake_put)
+    monkeypatch.setattr(
+        sync.PPOTrainer,
+        "_compute_old_log_prob",
+        lambda _self, batch, _metrics: batch,
+    )
+
+    trainer = object.__new__(R2OPLBaseTrainer)
+    trainer.config = OmegaConf.create(
+        {
+            "data": {"train_batch_size": question_count},
+            "actor_rollout_ref": {"rollout": {"n": rollouts_per_question}},
+            "algorithm": {"r2opl_base": {"lambda": 0.05}},
+        }
+    )
+    result = trainer._compute_old_log_prob(FakeBatch(), metrics={})
+
+    assert "prompts" in requested_fields
+    assert "responses" in requested_fields
+    assert "teacher_logprobs" in requested_fields
+    assert len(result) == batch_size
+    assert stored_fields["r2opl_base_correct_mask"].is_nested
+    assert stored_fields["r2opl_base_error_mask"].is_nested
+    assert stored_fields["r2opl_base_difficulty"].is_nested
+    assert stored_fields["r2opl_base_lambda"].shape == (batch_size,)
 
 
 def test_wandb_aliases_expose_all_requested_gradient_diagnostics():
