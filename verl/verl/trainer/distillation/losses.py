@@ -680,7 +680,7 @@ def compute_fire_opd_trajectory_loss(
 
 
 @register_distillation_loss(
-    DistillationLossSettings(names=["r2opl_base"], use_estimator=True)
+    DistillationLossSettings(names=["r2opl_base", "r2opl_base_v2"], use_estimator=True)
 )  # type: ignore[arg-type]
 def compute_r2opl_base_sampled_token_loss(
     config: ActorConfig,
@@ -797,7 +797,39 @@ def compute_r2opl_base_sampled_token_loss(
         if not bool(torch.isfinite(lambda_tensor).all()) or bool(lambda_tensor.lt(0.0).any()):
             raise ValueError("R²OPL-base lambda values must be finite and non-negative.")
 
-    correct_advantage = difficulty.float()
+    miu_field = data.get("r2opl_base_miu", None)
+    if miu_field is None:
+        # R²OPL-base v1 never transports a miu field; its correct-branch
+        # advantage is exactly the fixed ``1``.
+        miu_tensor = torch.tensor(
+            1.0, dtype=opd_advantage.dtype, device=opd_advantage.device
+        )
+    else:
+        miu_field = tu.unwrap_non_tensor_data(miu_field)
+        if not torch.is_tensor(miu_field):
+            miu_field = torch.tensor(
+                float(miu_field),
+                dtype=opd_advantage.dtype,
+                device=opd_advantage.device,
+            )
+        if miu_field.is_nested:
+            miu_field = miu_field.to_padded_tensor(1.0)
+        miu_tensor = miu_field.to(
+            dtype=opd_advantage.dtype, device=opd_advantage.device
+        ).reshape(-1)
+        if miu_tensor.numel() == 1:
+            miu_tensor = miu_tensor.reshape(1, 1)
+        elif miu_tensor.numel() == opd_advantage.shape[0]:
+            miu_tensor = miu_tensor.reshape(-1, 1)
+        else:
+            raise ValueError(
+                "R²OPL-base miu must be scalar or have one value per trajectory; "
+                f"got {miu_tensor.numel()} values for batch size {opd_advantage.shape[0]}."
+            )
+        if not bool(torch.isfinite(miu_tensor).all()) or bool(miu_tensor.le(0.0).any()):
+            raise ValueError("R²OPL-base miu values must be finite and positive.")
+
+    correct_advantage = difficulty.float() * miu_tensor
     error_advantage = difficulty.float() * lambda_tensor * opd_advantage
     branch = str(
         tu.get_non_tensor_data(data, "r2opl_base_gradient_branch", default="total")

@@ -295,6 +295,13 @@ class AgentLoopOutput(BaseModel):
             value = output["extra_fields"].pop(field_name, None)
             if value is not None:
                 output[field_name] = torch.tensor(float(value), dtype=torch.float32)
+        for field_name in (
+            "r2opl_v2_truncated",
+            "r2opl_v2_probe_correct",
+        ):
+            value = output["extra_fields"].pop(field_name, None)
+            if value is not None:
+                output[field_name] = torch.tensor(float(value), dtype=torch.float32)
         return output
 
 
@@ -1261,6 +1268,7 @@ class AgentLoopWorker:
             is_cal_opd = algorithm_name == "cal_opd"
             is_oa_opd = algorithm_name == "oa_opd"
             is_fast_oa_opd = algorithm_name == "fast_oa_opd"
+            is_r2opl_v2 = algorithm_name == "r2opl_base_v2"
 
             sol_unprivileged_teacher_prompt_ids = None
             if is_sol_opd:
@@ -1450,6 +1458,56 @@ class AgentLoopWorker:
                     output.extra_fields["oa_opd_num_steps"] = 0.0
                     output.extra_fields["oa_opd_active_steps"] = 0.0
                     output.extra_fields["oa_opd_probe_failures"] = 1.0
+            if is_r2opl_v2:
+                # Only truncated training trajectories are probed.  A passing
+                # head/tail answer probe rescues the rollout into the
+                # self-reinforcement branch; failures keep the verifier verdict.
+                if sample_kwargs is None:
+                    raise RuntimeError("R²OPL-base v2 requires rollout answer metadata.")
+
+                def _python_scalar(value):
+                    return value.item() if hasattr(value, "item") else value
+
+                answer = str(
+                    _python_scalar(sample_kwargs.get("oa_ground_truth_answer", ""))
+                )
+                if teacher_prompt_ids != prompt_ids:
+                    raise RuntimeError(
+                        "R²OPL-base v2 requires identical no-thinking Student/Teacher "
+                        "prompt token IDs so every probe preserves the original rollout prefix."
+                    )
+                probe_result = None
+                try:
+                    from utils.r2opl_v2 import compute_r2opl_v2_probe
+
+                    probe_result = await compute_r2opl_v2_probe(
+                        tokenizer=self.tokenizer,
+                        teacher_probe=(
+                            self.teacher_server_manager.compute_answer_probe_mean_logprob_single
+                        ),
+                        prompt_ids=prompt_ids,
+                        response_ids=response_ids,
+                        answer=answer,
+                        max_new_tokens=int(
+                            self.config.rlvr_generation.train_max_new_tokens
+                        ),
+                        routing_key=routing_key,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "R²OPL-base v2 answer probe failed; keeping verifier verdict: %s",
+                        exc,
+                    )
+                if probe_result is None:
+                    output.extra_fields["r2opl_v2_truncated"] = 1.0
+                    output.extra_fields["r2opl_v2_probe_correct"] = 0.0
+                else:
+                    output.extra_fields["r2opl_v2_truncated"] = float(
+                        probe_result.truncated
+                    )
+                    output.extra_fields["r2opl_v2_probe_correct"] = float(
+                        probe_result.probe_correct
+                    )
             if is_ps_opd:
                 if sample_kwargs is None:
                     raise RuntimeError("PS-OPD requires rollout question and answer metadata.")
