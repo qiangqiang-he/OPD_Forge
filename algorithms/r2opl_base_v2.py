@@ -6,9 +6,9 @@ R²OPL-base v2 extends R²OPL-base with two changes:
   (so R²OPL-base is exactly the ``miu = 1`` case);
 * a truncated training rollout — which the verifier cannot grade and v1 always
   sent to the OPD branch — is probed with a lightweight head/tail answer probe.
-  If the tail confidence exceeds 0.5 and improves on the head prior by more
-  than 0.3 (both in probability space), the rollout is reclassified as correct,
-  its reward is counted as 1, and it joins the self-reinforcement branch.
+  If the tail confidence improves on the head prior by more than 0.3 (in
+  probability space), the rollout is reclassified as correct, its reward is
+  counted as 1, and it joins the self-reinforcement branch.
 
 As in R²OPL-base, the incorrect branch is ``lambda * (log pi_teacher -
 log pi_student)`` and both branches are multiplied by the prompt-level

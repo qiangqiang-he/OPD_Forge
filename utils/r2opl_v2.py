@@ -3,9 +3,9 @@
 The probe is a lightweight head/tail confidence check used *only* on truncated
 training trajectories.  A truncated rollout cannot be graded by the verifier;
 instead we ask the Teacher how confident it is in the gold answer (a) given the
-prompt alone and (b) after the truncated reasoning prefix.  A high tail
-confidence that is also a large improvement over the head prior marks the
-rollout as on-track and moves it to the self-reinforcement branch.
+prompt alone and (b) after the truncated reasoning prefix.  A large
+improvement of the tail confidence over the head prior marks the rollout as
+on-track and moves it to the self-reinforcement branch.
 
 The probe is fail-closed: a failed or non-finite probe keeps the trajectory in
 the verifier-error branch, and non-truncated trajectories are never probed.
@@ -22,7 +22,6 @@ from typing import Any, Awaitable, Callable, Optional
 from utils.oa_opd import AnswerProbe, build_answer_probe
 
 
-R2OPL_V2_TAIL_PROB_THRESHOLD = 0.5
 R2OPL_V2_DELTA_THRESHOLD = 0.3
 
 
@@ -200,10 +199,7 @@ async def compute_r2opl_v2_probe(
 
     head_probability = math.exp(head_logprob)
     tail_probability = math.exp(tail_logprob)
-    probe_correct = (
-        tail_probability > R2OPL_V2_TAIL_PROB_THRESHOLD
-        and (tail_probability - head_probability) > R2OPL_V2_DELTA_THRESHOLD
-    )
+    probe_correct = (tail_probability - head_probability) > R2OPL_V2_DELTA_THRESHOLD
     return R2OPLV2ProbeResult(
         truncated=True,
         probe_correct=probe_correct,
@@ -214,7 +210,6 @@ async def compute_r2opl_v2_probe(
 
 __all__ = [
     "R2OPL_V2_DELTA_THRESHOLD",
-    "R2OPL_V2_TAIL_PROB_THRESHOLD",
     "R2OPLV2ProbeResult",
     "compute_r2opl_v2_probe",
     "find_tail_split_token_end",
