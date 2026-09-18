@@ -12,7 +12,7 @@ This CPU-only finalizer never modifies or deletes source shards.  It:
 2. streams every Teacher and Student shard;
 3. validates record counts, case IDs, arms, rewards and MC values;
 4. removes only duplicates whose result-bearing fields are identical;
-5. blocks on conflicting duplicates or missing/unexpected records;
+5. by default blocks on conflicting duplicates or missing/unexpected records;
 6. writes ``ersr_results.json``, ``ersr_summary.json`` and a detailed
    ``finalization_audit.json`` using atomic replacement.
 
@@ -27,6 +27,11 @@ Example:
 
 Use ``--audit-only`` first when desired.  Existing final outputs are never
 overwritten unless ``--force`` is explicitly supplied.
+
+If an interrupted run regenerated a small number of Student case/arm records
+with different Monte-Carlo samples, ``--allow-conflicting-student-duplicates``
+can be used to keep the deterministic first shard record.  This is explicitly
+recorded in the final audit; source shards are still left untouched.
 """
 
 from __future__ import annotations
@@ -464,14 +469,15 @@ def _scan_teacher(
     return unique, audit
 
 
-def _audit_problems(audit: dict[str, Any]) -> list[str]:
+def _audit_problems(
+    audit: dict[str, Any], *, allow_conflicting_student_duplicates: bool
+) -> list[str]:
     problems: list[str] = []
     student = audit["observed"]["student"]
-    for field in (
-        "conflicting_duplicate_groups",
-        "missing_case_arm_records",
-        "unexpected_case_arm_records",
-    ):
+    student_fields = ["missing_case_arm_records", "unexpected_case_arm_records"]
+    if not allow_conflicting_student_duplicates:
+        student_fields.insert(0, "conflicting_duplicate_groups")
+    for field in student_fields:
         if int(student[field]):
             problems.append(f"student.{field}={student[field]}")
     for teacher, entry in audit["observed"]["teachers"].items():
@@ -491,6 +497,7 @@ def finalize(
     audit_path: Path | None = None,
     audit_only: bool = False,
     force: bool = False,
+    allow_conflicting_student_duplicates: bool = False,
 ) -> dict[str, Any]:
     """Audit shards and, when safe, create the evaluator's final JSON files."""
 
@@ -511,6 +518,11 @@ def finalize(
             "student_texts": (
                 "Continuation texts are not copied to ersr_results.json; differing "
                 "text hashes with identical result fields are reported but do not block."
+            ),
+            "conflicting_student_duplicates": (
+                "Blocked by default.  When explicitly allowed, the record from the "
+                "lexicographically first shard is retained; all conflicts remain in "
+                "this audit."
             ),
         },
     }
@@ -551,8 +563,20 @@ def finalize(
             "teachers": teacher_audits,
             "student": student_audit,
         }
-        problems = _audit_problems(audit)
+        problems = _audit_problems(
+            audit,
+            allow_conflicting_student_duplicates=allow_conflicting_student_duplicates,
+        )
         audit["problems"] = problems
+        audit["ignored_problems"] = []
+        if (
+            allow_conflicting_student_duplicates
+            and int(student_audit["conflicting_duplicate_groups"])
+        ):
+            audit["ignored_problems"].append(
+                "student.conflicting_duplicate_groups="
+                f"{student_audit['conflicting_duplicate_groups']}"
+            )
         if problems:
             raise FinalizationError(
                 "Shard audit blocked finalization: " + "; ".join(problems)
@@ -642,6 +666,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="atomically replace existing ersr_results/ersr_summary files.",
     )
+    parser.add_argument(
+        "--allow-conflicting-student-duplicates",
+        action="store_true",
+        help=(
+            "retain the first record from sorted Student shards when duplicate "
+            "case/arm MC results conflict; all such conflicts remain in the audit."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -653,6 +685,9 @@ def main() -> None:
             audit_path=args.audit_output,
             audit_only=bool(args.audit_only),
             force=bool(args.force),
+            allow_conflicting_student_duplicates=bool(
+                args.allow_conflicting_student_duplicates
+            ),
         )
     except Exception as exc:
         print(

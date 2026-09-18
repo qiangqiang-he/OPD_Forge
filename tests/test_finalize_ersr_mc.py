@@ -221,6 +221,27 @@ class TestBlockedFinalization(FinalizerTestCase):
         self.assertIn("rewards", differing)
         self.assertFalse((self.root / "ersr_results.json").exists())
 
+    def test_conflicting_student_duplicate_can_be_explicitly_retained(self) -> None:
+        _make_run(self.root, with_duplicate=False)
+        # The sorted first shard contains correct_count=1; the resumed shard
+        # contains a different MC sample for precisely the same case/arm.
+        conflicting = _student_record(0, "redecide", 2, text_tag="conflict")
+        base.atomic_json(
+            self.root / "student" / "shards" / "gpu_0_batch_000001.json",
+            _shard("student", [conflicting], batch_index=1),
+        )
+
+        audit = finalizer.finalize(
+            self.root, allow_conflicting_student_duplicates=True
+        )
+
+        self.assertEqual(audit["status"], "complete")
+        self.assertEqual(
+            audit["ignored_problems"], ["student.conflicting_duplicate_groups=1"]
+        )
+        results = base.load_json(self.root / "ersr_results.json")
+        self.assertEqual(results[0]["values"]["redecide"], 0.25)
+
     def test_missing_arm_blocks_finalization(self) -> None:
         _make_run(self.root, with_duplicate=False)
         shard_path = self.root / "student" / "shards" / "gpu_0_batch_000000.json"
