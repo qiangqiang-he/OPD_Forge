@@ -169,6 +169,11 @@ class ScratchTestCase(unittest.TestCase):
 
 
 class TestCollectorPreparation(ScratchTestCase):
+    def test_server_default_has_no_reserved_free_memory(self) -> None:
+        with mock.patch.object(sys, "argv", ["collect_ersr_answer_probes_03.py"]):
+            args = collector.parse_args()
+        self.assertEqual(args.min_free_gpu_gib, 0.0)
+
     def test_exact_prefix_and_ersr_values(self) -> None:
         task = collector.prepare_task(
             ersr_record(1), FakeTokenizer(), probe_builder=fake_probe_builder

@@ -862,7 +862,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--batch-size", type=int, default=32, help="probe sequences per vLLM call")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.78)
-    parser.add_argument("--min-free-gpu-gib", type=float, default=5.0)
+    parser.add_argument(
+        "--min-free-gpu-gib",
+        type=float,
+        default=0.0,
+        help=(
+            "minimum nvidia-smi free-memory safety margin; the server default is "
+            "zero so the full device can be used, while desktop smoke tests may "
+            "set a positive reserve explicitly"
+        ),
+    )
     parser.add_argument("--max-num-batched-tokens", type=int, default=32768)
     parser.add_argument(
         "--max-cases",
