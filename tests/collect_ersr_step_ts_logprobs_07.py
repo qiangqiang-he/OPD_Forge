@@ -331,6 +331,15 @@ def score_worker(
             except Exception:
                 pass
             del llm
+            import gc
+
+            gc.collect()
+            try:
+                import torch
+
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
 
 
 def next_shard_index(shard_dir: Path, gpu_id: int, role_tag: str) -> int:
@@ -409,6 +418,7 @@ def run_role(
     started = time.monotonic()
     ready: set[int] = set()
     done: set[int] = set()
+    completed_normally = False
     try:
         for rank, (gpu_id, assigned) in enumerate(zip(gpu_ids, assignments, strict=True)):
             process = context.Process(
@@ -488,19 +498,59 @@ def run_role(
                 done.add(int(message["rank"]))
             else:
                 raise RuntimeError(f"Unknown worker message: {message!r}")
+        completed_normally = True
     finally:
+        # Workers send their "done" message before vLLM/NCCL teardown, and that
+        # teardown can be slow or hang.  After normal completion give every
+        # worker a grace window to exit by itself before terminating it, so a
+        # slow engine shutdown is never mistaken for a failed worker.
+        deadline = time.monotonic() + (180.0 if completed_normally else 0.0)
         for process in processes:
+            process.join(timeout=max(0.0, deadline - time.monotonic()))
+        terminated: list[int] = []
+        for rank_index, process in enumerate(processes):
             if process.is_alive():
                 process.terminate()
+                terminated.append(rank_index)
         for process in processes:
             process.join(timeout=30)
-    failed = [
+    if terminated:
+        print(
+            json.dumps(
+                {
+                    "event": "07_worker_shutdown_terminated",
+                    "role": role,
+                    "ranks": terminated,
+                    "note": (
+                        "workers already reported done; engine teardown was "
+                        "terminated after the grace window"
+                    ),
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+    exit_report = [
         f"rank={rank}, exitcode={process.exitcode}"
         for rank, process in enumerate(processes)
         if process.exitcode not in (0, None)
     ]
-    if failed:
-        raise RuntimeError("Worker processes failed: " + "; ".join(failed))
+    if exit_report:
+        # Reaching here means every worker already reported done and all its
+        # shards are atomic on disk, so a non-zero exit code during teardown is
+        # noise rather than a data failure.  Genuine in-flight failures are
+        # raised inside the message loop above.
+        print(
+            json.dumps(
+                {
+                    "event": "07_worker_exit_codes_after_done",
+                    "role": role,
+                    "workers": exit_report,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
     if len(ready) != len(processes):
         raise RuntimeError(f"Only {len(ready)}/{len(processes)} workers became ready.")
     final = {
